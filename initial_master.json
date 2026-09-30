@@ -1,0 +1,10 @@
+{
+  "type": "infomartOrderNav.initialMaster",
+  "schemaVersion": 3,
+  "masterVersion": 1,
+  "createdAt": null,
+  "vendors": [],
+  "products": [],
+  "note": "紙スケジュールOCR対応。scheduleMode / scheduleEntries / scheduleClass を保存できます。",
+  "appFeatureVersion": "1.4"
+}

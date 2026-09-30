@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b6edc">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="発注ナビ">
+  <title>Infomart 発注ナビ</title>
+  <link rel="manifest" href="./manifest.webmanifest">
+  <link rel="apple-touch-icon" href="./icon-192.png">
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <div id="app">
+    <header class="app-header">
+      <div>
+        <div class="eyebrow">Infomart 発注ナビ</div>
+        <h1>発注ナビ</h1>
+      </div>
+      <div class="header-actions">
+        <button id="profileBtn" class="profile-btn" aria-label="利用者を切り替える">
+          👤 <span id="profileName">利用者</span>
+        </button>
+        <button id="adminBtn" class="icon-btn" aria-label="管理者モード">🔒</button>
+        <button id="settingsBtn" class="icon-btn" aria-label="設定">⚙️</button>
+      </div>
+    </header>
+
+    <main id="main"></main>
+  </div>
+
+  <dialog id="modal" class="modal">
+    <div id="modalBody"></div>
+    <form method="dialog" class="modal-close-row">
+      <button class="btn secondary">閉じる</button>
+    </form>
+  </dialog>
+
+  <input id="ocrFiles" type="file" accept="image/*" multiple hidden>
+  <input id="scheduleOcrFiles" type="file" accept="image/*" multiple hidden>
+  <input id="importFile" type="file" accept="application/json,.json" hidden>
+  <input id="masterImportFile" type="file" accept="application/json,.json" hidden>
+
+  <script src="./product-table-ocr.js"></script>
+  <script src="./app.js"></script>
+</body>
+</html>
