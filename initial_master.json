@@ -5,6 +5,6 @@
   "createdAt": null,
   "vendors": [],
   "products": [],
-  "note": "紙スケジュールOCR対応。scheduleMode / scheduleEntries / scheduleClass を保存できます。",
-  "appFeatureVersion": "1.4"
+  "note": "v1.4.9 P0安全化対応。紙スケジュール / allowDecimalQty / DOM本人確認を保存できます。",
+  "appFeatureVersion": "1.4.9"
 }

@@ -2,12 +2,16 @@
 "use strict";
 
 const SCHEMA_VERSION=3;
-const APP_VERSION="1.4.7";
+const APP_VERSION="1.4.9";
 const ROOT_KEY="infomartOrderNav.root.v3";
 const OLD_ROOT_KEY="infomartOrderNav.multiuser.v2";
 const LEGACY_KEY="infomartOrderNav.web.v1";
 const SNAP_KEY="infomartOrderNav.snapshots.v3";
 const PFX="IFM1:";
+const RECEIPT_PFX="IFMR1:";
+const PAYLOAD_TTL_MS=60*60*1000;
+const RECEIPT_TTL_MS=24*60*60*1000;
+const OPEN_DATE_SEARCH_DAYS=366;
 const DEFAULT_URL="https://www2.infomart.co.jp/mypage/mypage_fb.page?93&IMReferer=/scripts/mode.page";
 const IDLE_MS=15*60*1000;
 const ADMIN_SESSION_MS=10*60*1000;
@@ -69,7 +73,8 @@ function masterProductFromProduct(p){
     ...Object.fromEntries(['specification','vendorDisplay','screenshotSource','domSyncStatus','screenshotReviewBeforeDom','domMatchedAt'].filter(k=>p[k]!==undefined).map(k=>[k,clone(p[k])])),
     vendorId:p.vendorId||"",
     leadDaysOverride:Number.isFinite(+p.leadDaysOverride)?+p.leadDaysOverride:null,
-    scheduleClass:String(p.scheduleClass||"standard")
+    scheduleClass:String(p.scheduleClass||"standard"),
+    allowDecimalQty:p.allowDecimalQty===true
   };
 }
 function personalProductFromMaster(mp,old=null){
@@ -83,6 +88,7 @@ function personalProductFromMaster(mp,old=null){
     vendorId:mp.vendorId,
     leadDaysOverride:mp.leadDaysOverride,
     scheduleClass:String(mp.scheduleClass||old?.scheduleClass||"standard"),
+    allowDecimalQty:mp.allowDecimalQty===true,
     defaultQty:old?.defaultQty??(mp.domSource||mp.imageSource?0:1),
     intervalMode:old?.intervalMode??"daily",
     intervalDays:Math.max(1,+old?.intervalDays||1),
@@ -295,10 +301,54 @@ function commonMasterPackage(){
     products:clone(ROOT.commonMaster.products)
   };
 }
+function validIsoDateString(s){
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(String(s||"")))return false;
+  const d=parseDate(s);return d instanceof Date&&!Number.isNaN(d.getTime())&&iso(d)===s;
+}
+function validateMasterPackage(pkg){
+  if(!pkg||pkg.type!=="infomartOrderNav.initialMaster")throw new Error("共通マスターJSONではありません");
+  if(pkg.schemaVersion!==SCHEMA_VERSION)throw new Error(`マスターのschemaVersionが違います（必要 ${SCHEMA_VERSION}）`);
+  if(!Array.isArray(pkg.vendors)||!Array.isArray(pkg.products))throw new Error("マスター形式が違います");
+  if(pkg.vendors.length>500||pkg.products.length>10000)throw new Error("マスター件数が上限を超えています");
+  const vendors=pkg.vendors.map(normalizeVendor),vids=new Set(),vnames=new Set();
+  for(const v of vendors){
+    if(!v.id||typeof v.id!=="string"||vids.has(v.id))throw new Error("発注先IDが空または重複しています");
+    vids.add(v.id);
+    const nm=String(v.name||"").trim();if(!nm)throw new Error("発注先名が空です");
+    const nk=nm.toLowerCase();if(vnames.has(nk))throw new Error(`発注先名が重複しています：${nm}`);vnames.add(nk);
+    if(!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(v.cutoff||"")))throw new Error(`${nm} の締切時刻が不正です`);
+    if(!Number.isFinite(+v.minDeliveryDays)||+v.minDeliveryDays<0||+v.minDeliveryDays>60)throw new Error(`${nm} の最短納品日数が不正です`);
+    for(const [label,a] of [["納品曜日",v.deliveryWeekdays],["発注不可曜日",v.orderClosedWeekdays]]){
+      if(!Array.isArray(a)||a.some(x=>!Number.isInteger(+x)||+x<0||+x>6)||new Set(a.map(Number)).size!==a.length)throw new Error(`${nm} の${label}が不正です`);
+    }
+    for(const [label,a] of [["発注休業日",v.orderClosedDates],["納品休業日",v.deliveryClosedDates]]){
+      if(!Array.isArray(a)||a.some(x=>!validIsoDateString(x)))throw new Error(`${nm} の${label}が不正です`);
+    }
+    if(!["unknown","allowed","blocked"].includes(v.orderHolidayRule)||!["unknown","allowed","blocked"].includes(v.deliveryHolidayRule))throw new Error(`${nm} の祝日ルールが不正です`);
+    if(!["rule","dated"].includes(v.scheduleMode))throw new Error(`${nm} のスケジュール方式が不正です`);
+    const seenSchedule=new Set();
+    for(const x of v.scheduleEntries||[]){
+      const cls=String(x.classKey||"standard"),key=`${cls}|${x.orderDate}`;
+      if(!validIsoDateString(x.orderDate)||!validIsoDateString(x.deliveryDate)||x.deliveryDate<x.orderDate)throw new Error(`${nm} の紙スケジュール日付が不正です`);
+      if(seenSchedule.has(key))throw new Error(`${nm} の紙スケジュールが重複しています：${key}`);seenSchedule.add(key);
+    }
+  }
+  const products=pkg.products.map(p=>({...clone(p),allowDecimalQty:p.allowDecimalQty===true})),codes=new Set(),pids=new Set();
+  for(const p of products){
+    if(!p.id||typeof p.id!=="string"||pids.has(p.id))throw new Error("商品IDが空または重複しています");pids.add(p.id);
+    const code=String(p.code||"").trim();
+    if(!/^\d{7,13}$/.test(code))throw new Error(`商品コードが不正です：${code||"(空)"}`);
+    if(codes.has(code))throw new Error(`商品コードが重複しています：${code}`);codes.add(code);
+    if(!vids.has(p.vendorId))throw new Error(`商品 ${code} の発注先が存在しません`);
+    if(p.leadDaysOverride!==null&&p.leadDaysOverride!==undefined&&(!Number.isFinite(+p.leadDaysOverride)||+p.leadDaysOverride<0||+p.leadDaysOverride>60))throw new Error(`商品 ${code} の最短納品日数が不正です`);
+    if(p.domSource){validateDomRow(p.domSource);if(String(p.domSource.code)!==code)throw new Error(`商品 ${code} のDOMコードが一致しません`)}
+  }
+  return {vendors,products};
+}
 function applyMasterPackage(pkg,{reason="共通マスター更新"}={}){
-  if(!pkg||!Array.isArray(pkg.vendors)||!Array.isArray(pkg.products))throw new Error("マスター形式が違います");
+  const checked=validateMasterPackage(pkg);
   checkpoint(reason+"前");
-  ROOT.commonMaster={vendors:clone(pkg.vendors),products:clone(pkg.products)};
+  ROOT.commonMaster={vendors:clone(checked.vendors),products:clone(checked.products)};
   ROOT.masterVersion=+pkg.masterVersion||((ROOT.masterVersion||0)+1);
   syncMasterToProfiles();
   save(reason);
@@ -308,29 +358,74 @@ function today(){let d=new Date();d.setHours(12,0,0,0);return d}
 function iso(d){return d.toISOString().slice(0,10)}
 function parseDate(s){let[y,m,d]=String(s).split("-").map(Number);return new Date(y,m-1,d,12)}
 function add(d,n){let x=new Date(d);x.setDate(x.getDate()+n);return x}
-function fmt(d){return new Intl.DateTimeFormat("ja-JP",{month:"numeric",day:"numeric",weekday:"short"}).format(d)}
-function fmtF(d){return new Intl.DateTimeFormat("ja-JP",{year:"numeric",month:"numeric",day:"numeric",weekday:"short"}).format(d)}
+function fmt(d){return d instanceof Date&&!Number.isNaN(d.getTime())?new Intl.DateTimeFormat("ja-JP",{month:"numeric",day:"numeric",weekday:"short"}).format(d):"計算停止"}
+function fmtF(d){return d instanceof Date&&!Number.isNaN(d.getTime())?new Intl.DateTimeFormat("ja-JP",{year:"numeric",month:"numeric",day:"numeric",weekday:"short"}).format(d):"計算停止"}
 function nowMin(){let d=new Date();return d.getHours()*60+d.getMinutes()}
 function hm(s){let[h,m]=String(s||"00:00").split(":").map(Number);return h*60+m}
 function intLabel(p){return p.intervalMode==="daily"?"毎日":`${Math.max(1,+p.intervalDays||1)}日ごと`}
 function lead(p){return Number.isFinite(+p.leadDaysOverride)?+p.leadDaysOverride:+(V(p.vendorId)?.minDeliveryDays??3)}
 
-function holiday(d){
-  let y=d.getFullYear(),m=d.getMonth()+1,day=d.getDate(),k=`${m}/${day}`;
-  let f={"1/1":"元日","2/11":"建国記念の日","2/23":"天皇誕生日","4/29":"昭和の日","5/3":"憲法記念の日","5/4":"みどりの日","5/5":"こどもの日","8/11":"山の日","11/3":"文化の日","11/23":"勤労感謝の日"};
-  if(f[k])return f[k];
-  let nth=(mo,n)=>{let x=new Date(y,mo-1,1,12);while(x.getDay()!==1)x.setDate(x.getDate()+1);x.setDate(x.getDate()+7*(n-1));return x.getDate()};
-  if(m===1&&day===nth(1,2))return"成人の日";if(m===7&&day===nth(7,3))return"海の日";if(m===9&&day===nth(9,3))return"敬老の日";if(m===10&&day===nth(10,2))return"スポーツの日";
-  let ve=Math.floor(20.8431+.242194*(y-1980)-Math.floor((y-1980)/4)),ae=Math.floor(23.2488+.242194*(y-1980)-Math.floor((y-1980)/4));
-  if(m===3&&day===ve)return"春分の日";if(m===9&&day===ae)return"秋分の日";return null
+function nthMondayDay(y,m,n){
+  const x=new Date(y,m-1,1,12);while(x.getDay()!==1)x.setDate(x.getDate()+1);x.setDate(x.getDate()+7*(n-1));return x.getDate();
 }
-function orderOpen(d,v){if(!v||v.orderHolidayRule==="unknown")return false;if((v.orderClosedWeekdays||[]).includes(d.getDay()))return false;if((v.orderClosedDates||[]).includes(iso(d)))return false;if(v.orderHolidayRule==="blocked"&&holiday(d))return false;return true}
-function deliveryOpen(d,v){if(!v||v.deliveryHolidayRule==="unknown")return false;let a=v.deliveryWeekdays||[];if(!a.length||!a.includes(d.getDay()))return false;if((v.deliveryClosedDates||[]).includes(iso(d)))return false;if(v.deliveryHolidayRule==="blocked"&&holiday(d))return false;return true}
-function nextOrder(d,v){let x=new Date(d);for(let i=0;i<40;i++){if(orderOpen(x,v))return x;x=add(x,1)}return x}
-function prevOrder(d,v){let x=new Date(d);for(let i=0;i<40;i++){if(orderOpen(x,v))return x;x=add(x,-1)}return x}
-function nextDelivery(d,v){let x=new Date(d);for(let i=0;i<40;i++){if(deliveryOpen(x,v))return x;x=add(x,1)}return x}
+function baseHolidayName(y,m,day){
+  const k=`${m}/${day}`;
+  const fixed={"1/1":"元日","2/11":"建国記念の日","2/23":"天皇誕生日","4/29":"昭和の日","5/3":"憲法記念の日","5/4":"みどりの日","5/5":"こどもの日","11/3":"文化の日","11/23":"勤労感謝の日"};
+  if(fixed[k])return fixed[k];
+  if(y===2019&&m===5&&day===1)return"天皇の即位の日";
+  if(y===2019&&m===10&&day===22)return"即位礼正殿の儀";
+  if(y===2020){
+    if(m===7&&day===23)return"海の日";if(m===7&&day===24)return"スポーツの日";if(m===8&&day===10)return"山の日";
+  }else if(y===2021){
+    if(m===7&&day===22)return"海の日";if(m===7&&day===23)return"スポーツの日";if(m===8&&day===8)return"山の日";
+  }else{
+    if(m===7&&day===nthMondayDay(y,7,3))return"海の日";
+    if(m===8&&day===11)return"山の日";
+    if(m===10&&day===nthMondayDay(y,10,2))return"スポーツの日";
+  }
+  if(m===1&&day===nthMondayDay(y,1,2))return"成人の日";
+  if(m===9&&day===nthMondayDay(y,9,3))return"敬老の日";
+  const ve=Math.floor(20.8431+.242194*(y-1980)-Math.floor((y-1980)/4));
+  const ae=Math.floor(23.2488+.242194*(y-1980)-Math.floor((y-1980)/4));
+  if(m===3&&day===ve)return"春分の日";if(m===9&&day===ae)return"秋分の日";
+  return null;
+}
+const HOLIDAY_CACHE=new Map();
+function holidayMapForYear(y){
+  if(HOLIDAY_CACHE.has(y))return HOLIDAY_CACHE.get(y);
+  const map=new Map(),key=d=>iso(d);
+  for(let m=1;m<=12;m++)for(let day=1;day<=31;day++){
+    const d=new Date(y,m-1,day,12);if(d.getMonth()!==m-1)continue;
+    const name=baseHolidayName(y,m,day);if(name)map.set(key(d),name);
+  }
+  // 国民の休日：祝日に挟まれた日を休日化。
+  for(let d=new Date(y,0,2,12);d.getFullYear()===y;d=add(d,1)){
+    const k=key(d);if(map.has(k))continue;
+    const prev=key(add(d,-1)),next=key(add(d,1));
+    if(map.has(prev)&&map.has(next))map.set(k,"国民の休日");
+  }
+  // 振替休日：日曜の祝日の後、最初の祝日でない日を休日化（現行法の連続振替に対応）。
+  const originals=[...map.entries()].map(([k,name])=>({d:parseDate(k),name}));
+  for(const h of originals){
+    if(h.d.getDay()!==0)continue;
+    let x=add(h.d,1),guard=0;while(map.has(key(x))&&guard++<10)x=add(x,1);
+    if(x.getFullYear()===y)map.set(key(x),"振替休日");
+  }
+  HOLIDAY_CACHE.set(y,map);return map;
+}
+function holiday(d){
+  if(!(d instanceof Date)||Number.isNaN(d.getTime()))return null;
+  const y=d.getFullYear();
+  if(y<1980||y>2099)return"休日カレンダー範囲外";
+  return holidayMapForYear(y).get(iso(d))||null;
+}
+function orderOpen(d,v){if(!d||!v||v.orderHolidayRule==="unknown")return false;if((v.orderClosedWeekdays||[]).includes(d.getDay()))return false;if((v.orderClosedDates||[]).includes(iso(d)))return false;if(v.orderHolidayRule==="blocked"&&holiday(d))return false;return true}
+function deliveryOpen(d,v){if(!d||!v||v.deliveryHolidayRule==="unknown")return false;let a=v.deliveryWeekdays||[];if(!a.length||!a.includes(d.getDay()))return false;if((v.deliveryClosedDates||[]).includes(iso(d)))return false;if(v.deliveryHolidayRule==="blocked"&&holiday(d))return false;return true}
+function nextOrder(d,v){let x=new Date(d);for(let i=0;i<OPEN_DATE_SEARCH_DAYS;i++){if(orderOpen(x,v))return x;x=add(x,1)}return null}
+function prevOrder(d,v){let x=new Date(d);for(let i=0;i<OPEN_DATE_SEARCH_DAYS;i++){if(orderOpen(x,v))return x;x=add(x,-1)}return null}
+function nextDelivery(d,v){let x=new Date(d);for(let i=0;i<OPEN_DATE_SEARCH_DAYS;i++){if(deliveryOpen(x,v))return x;x=add(x,1)}return null}
 function acceptance(v){let d=today();if(nowMin()>hm(v.cutoff||"13:30"))d=add(d,1);return nextOrder(d,v)}
-function earliest(order,p,v){return nextDelivery(add(order,lead(p)),v)}
+function earliest(order,p,v){if(!order)return null;return nextDelivery(add(order,lead(p)),v)}
 function scheduleEntriesFor(v,p){
   if(!v||v.scheduleMode!=="dated"||!Array.isArray(v.scheduleEntries))return[];
   const cls=String(p?.scheduleClass||"standard");
@@ -351,7 +446,7 @@ function scheduleMismatch(orderDate,p,v){
   return Boolean(v?.scheduleMode==="dated"&&(v.scheduleEntries||[]).length&&!exactScheduleEntry(orderDate,p,v));
 }
 function nextDatedScheduleAfter(date,p,v){
-  const key=iso(date);return scheduleEntriesFor(v,p).find(x=>x.orderDate>=key)||null;
+  if(!date)return null;const key=iso(date);return scheduleEntriesFor(v,p).find(x=>x.orderDate>=key)||null;
 }
 function scheduleClassLabel(k){return k==="standard"?"通常":String(k||"通常")}
 function vendorScheduleSummary(v){return v?.scheduleMode==="dated"?`紙スケジュール ${(v.scheduleEntries||[]).length}件`:"通常ルール"}
@@ -372,25 +467,31 @@ function entries(){
         due=orderOpen(d,v)?d:prevOrder(d,v);
         delivery=earliest(d,p,v);
       }
+      const safetyIssue=!due?`発注可能日が${OPEN_DATE_SEARCH_DAYS}日以内に見つかりません`:!delivery?`納品可能日が${OPEN_DATE_SEARCH_DAYS}日以内に見つかりません`:null;
       if(!S.history.some(h=>h.key===key)&&!S.canceled.includes(key)){
-        out.push({key,p,v,scheduled:new Date(d),due,delivery,scheduleExact:exact,scheduleMismatch:mismatch,scheduleSuggestion:mismatch?nearestScheduleEntries(d,p,v):null});
+        out.push({key,p,v,scheduled:new Date(d),due,delivery,safetyIssue,scheduleExact:exact,scheduleMismatch:mismatch,scheduleSuggestion:mismatch?nearestScheduleEntries(d,p,v):null});
       }
       d=add(d,step)
     }
   }
-  return out.sort((a,b)=>a.due-b.due||a.delivery-b.delivery)
+  const ts=d=>d instanceof Date&&!Number.isNaN(d.getTime())?d.getTime():Number.MAX_SAFE_INTEGER;
+  return out.sort((a,b)=>ts(a.due)-ts(b.due)||ts(a.delivery)-ts(b.delivery))
 }
 function classify(){
   let t=today(),n=nowMin(),attention=[],overdue=[],due=[],upcoming=[];
   for(let e of entries()){
+    if(e.safetyIssue){attention.push({...e,issue:`安全停止：${e.safetyIssue}`,earliest:null});continue}
+    const accepted=acceptance(e.v);
+    if(!accepted){attention.push({...e,issue:`安全停止：発注可能日が${OPEN_DATE_SEARCH_DAYS}日以内に見つかりません`,earliest:null});continue}
     let late=e.due<t||(iso(e.due)===iso(t)&&n>hm(e.v.cutoff||"13:30"));
     let scheduleIssue=e.scheduleMismatch;
     let genericDeliveryIssue=e.v.scheduleMode==="dated"?false:!deliveryOpen(e.delivery,e.v);
     let ea;
     if(e.v.scheduleMode==="dated"){
-      const next=nextDatedScheduleAfter(acceptance(e.v),e.p,e.v);
-      ea=next?parseDate(next.deliveryDate):earliest(acceptance(e.v),e.p,e.v);
-    }else ea=earliest(acceptance(e.v),e.p,e.v);
+      const next=nextDatedScheduleAfter(accepted,e.p,e.v);
+      ea=next?parseDate(next.deliveryDate):earliest(accepted,e.p,e.v);
+    }else ea=earliest(accepted,e.p,e.v);
+    if(!ea){attention.push({...e,issue:`安全停止：最短納品日が${OPEN_DATE_SEARCH_DAYS}日以内に見つかりません`,earliest:null});continue}
     let impossible=late&&e.delivery<ea;
     if(scheduleIssue||genericDeliveryIssue||impossible){
       let issue=scheduleIssue?"この発注日が紙スケジュール表にありません":genericDeliveryIssue?"納品不可日":"締切超過で予定納品日に間に合いません";
@@ -422,6 +523,7 @@ function integrityCheck(){
     if(!v.name)issue("名称が空の発注先があります");
     if(!v.cutoff)issue(`${v.name||"発注先"} の締切時刻が未設定です`);
     if(!Number.isFinite(+v.minDeliveryDays))issue(`${v.name||"発注先"} の最短納品日数が未設定です`);
+    if((v.orderClosedWeekdays||[]).length>=7)issue(`${v.name||"発注先"} は全曜日が発注不可になっています`);
     if(v.scheduleMode!=="dated"&&!(v.deliveryWeekdays||[]).length)issue(`${v.name||"発注先"} の納品可能曜日が未確認です`);
     if(v.orderHolidayRule==="unknown")issue(`${v.name||"発注先"} の祝日発注可否が未確認です`);
     if(v.deliveryHolidayRule==="unknown")issue(`${v.name||"発注先"} の祝日納品可否が未確認です`);
@@ -490,17 +592,23 @@ function nextAction(c){
   if(c.upcoming.length)return nextCard("green","現在の状態","今日の発注は完了です",`次は ${fmtF(c.upcoming[0].due)} に発注予定です。`,"今後の予定を見る","today");
   return nextCard("green","現在の状態","発注予定はありません","商品・発注間隔を確認してください。","商品を見る","products")
 }
-function row(e){return `<div class="task"><div><strong>${esc(e.p.name||e.p.code)}</strong><br><span class="muted">発注 ${fmt(e.due)} ${esc(e.v.cutoff)} / 納品 ${fmt(e.delivery)} / ${esc(intLabel(e.p))}</span></div><button class="btn secondary small" data-one="${esc(e.key)}">確認</button></div>`}
+function row(e){return `<div class="task"><div><strong>${esc(e.p.name||e.p.code)}</strong><br><span class="muted">発注 ${fmt(e.due)} ${esc(e.v.cutoff)} / 納品 ${fmt(e.delivery)} / ${esc(intLabel(e.p))}</span>${e.issue||e.safetyIssue?`<br><span class="error">${esc(e.issue||e.safetyIssue)}</span>`:""}</div><button class="btn secondary small" data-one="${esc(e.key)}">確認</button></div>`}
 function section(title,list,tone){return list.length?`<div class="section">${esc(title)} <span class="badge ${tone}">${list.length}件</span></div><section class="card">${list.slice(0,8).map(row).join("")}</section>`:""}
 
+function pendingVerifiedCount(r){
+  const verified=r?.inputVerified||{};return (r?.items||[]).filter(i=>String(verified[i.code]??"")===String(i.qty)).length;
+}
 function pendingRunCard(){
   if(!S.pendingRun)return"";
-  const r=S.pendingRun;
-  return `<section class="card pending-run"><h3>Infomart発注の結果を記録</h3><p><strong>${esc(r.name)}</strong></p><p>${r.items.length}商品 / 開始 ${esc(new Date(r.startedAt).toLocaleString("ja-JP"))}</p><div class="grid2"><button class="btn green" id="pendingDone">発注済みにする</button><button class="btn secondary" id="pendingClear">まだ発注していない</button></div></section>`
+  const r=S.pendingRun,verified=pendingVerifiedCount(r),all=verified===r.items.length,override=r.verificationOverride===true;
+  return `<section class="card pending-run"><h3>Infomart発注の結果を記録</h3><p><strong>${esc(r.name)}</strong></p><p>${r.items.length}商品 / 開始 ${esc(new Date(r.startedAt).toLocaleString("ja-JP"))}</p>
+    <div class="${all?"schedule-ok":override?"notice":"error"}">${all?`✓ 数量入力結果 ${verified}/${r.items.length}件を発注ナビで照合済み`:override?"管理者が手入力完了として確認済み":`数量入力結果 未確認 ${verified}/${r.items.length}件`}</div>
+    ${!all&&!override?'<button class="btn full" id="pendingVerify" style="margin-top:8px">数量入力結果コードを確認</button><button class="btn secondary full" id="pendingOverride" style="margin-top:8px">手入力で完了した場合（管理者確認）</button>':""}
+    <div class="grid2" style="margin-top:8px"><button class="btn green" id="pendingDone" ${all||override?"":"disabled"}>発注済みにする</button><button class="btn secondary" id="pendingClear">まだ発注していない</button></div></section>`
 }
 function homeMenu(){
   return `<section class="card"><h3>メニュー <span class="muted" style="font-size:12px">v${APP_VERSION}</span></h3><div class="grid2">`+[
-    ['vendors','発注先'],['products','商品・個人設定'],['presets','プリセット'],['health','システムチェック'],['backup','バックアップ/復元'],['paper','紙スケジュール'],['admin','管理者設定'],['mobile','スマホ自動入力'],['today','発注予定']
+    ['vendors','発注先'],['products','商品・個人設定'],['presets','プリセット'],['health','システムチェック'],['backup','バックアップ/復元'],['paper','紙スケジュール'],['admin','管理者設定'],['mobile','スマホ自動入力'],['today','発注予定'],['history','発注履歴を見る']
   ].map(([to,label])=>`<button class="btn secondary" data-nav="${to}">${label}</button>`).join('')+'</div></section>';
 }
 function home(){
@@ -511,7 +619,127 @@ function home(){
     ${c.upcoming.length?`<div class="section">これからの発注</div><section class="card">${c.upcoming.slice(0,5).map(row).join("")}</section>`:""}
     `
 }
-function todayView(){let c=classify(),list=[...c.attention,...c.overdue,...c.due,...c.upcoming.slice(0,20)];return `<button class="btn secondary small" data-nav="home">← ホーム</button><div class="section">発注予定</div><section class="card">${list.length?list.map(row).join(""):"現在の予定はありません。"}</section><section class="card"><h3>今日必要な商品をまとめて自動入力</h3><button class="btn full" id="todayAuto" ${(!c.due.length&&!c.overdue.length)?"disabled":""}>数量自動入力の準備</button></section>`}
+function todayView(){let c=classify(),list=[...c.attention,...c.overdue,...c.due,...c.upcoming.slice(0,20)];return `<button class="btn secondary small" data-nav="home">← ホーム</button><div class="section">発注予定</div><section class="card history-shortcuts"><div><strong>過去の発注を確認</strong><br><span class="muted">前年の同じ月をすぐ表示できます。</span></div><div class="row wrap"><button class="btn secondary" id="openHistory">発注履歴を見る</button><button class="btn" id="openPrevYearMonth">前年同月を表示</button></div></section><section class="card">${list.length?list.map(row).join(""):"現在の予定はありません。"}</section><section class="card"><h3>今日必要な商品をまとめて自動入力</h3><button class="btn full" id="todayAuto" ${(!c.due.length&&!c.overdue.length)?"disabled":""}>数量自動入力の準備</button></section>`}
+
+
+let HISTORY_MONTH=iso(today()).slice(0,7);
+
+function ymShift(ym,years){
+  const [y,m]=String(ym||iso(today()).slice(0,7)).split("-").map(Number);
+  return `${String(y+years).padStart(4,"0")}-${String(m).padStart(2,"0")}`;
+}
+function currentYM(){return iso(today()).slice(0,7)}
+function previousYearSameMonth(){return ymShift(currentYM(),-1)}
+function historyRecordsForMonth(ym){
+  return (S.history||[]).filter(h=>h.status==="completed"&&String(h.date||"").slice(0,7)===ym)
+    .slice().sort((a,b)=>String(b.recordedAt||b.date||"").localeCompare(String(a.recordedAt||a.date||"")));
+}
+function historyGroupsForMonth(ym){
+  const records=historyRecordsForMonth(ym),map=new Map(),groups=[];
+  for(const h of records){
+    const key=h.runId||`legacy:${h.date||"unknown"}`;
+    if(!map.has(key)){
+      const g={key,runId:h.runId||null,date:h.date||"",runName:h.runName||"",recordedAt:h.recordedAt||"",items:[]};
+      map.set(key,g);groups.push(g);
+    }
+    const g=map.get(key);
+    g.items.push(h);
+    if(!g.runName&&h.runName)g.runName=h.runName;
+    if((h.recordedAt||"")>(g.recordedAt||""))g.recordedAt=h.recordedAt;
+  }
+  groups.sort((a,b)=>String(b.recordedAt||b.date).localeCompare(String(a.recordedAt||a.date)));
+  return groups;
+}
+function historyVendorLabel(h){
+  if(h.vendorName)return h.vendorName;
+  const p=(S.products||[]).find(p=>p.id===h.productId||p.code===h.code);
+  return V(p?.vendorId)?.name||"発注先不明";
+}
+function historyPage(){
+  const groups=historyGroupsForMonth(HISTORY_MONTH);
+  const [yy,mm]=HISTORY_MONTH.split("-");
+  const prev=previousYearSameMonth();
+  const isPrev=HISTORY_MONTH===prev;
+
+  return `<button class="btn secondary small" data-nav="home">← ホーム</button>
+    <div class="section">発注履歴</div>
+    <section class="card history-toolbar">
+      <div>
+        <h3>${esc(yy)}年${esc(+mm)}月の発注</h3>
+        <p class="muted">発注ナビで「発注済み」にした履歴を表示します。</p>
+      </div>
+      <div class="history-controls">
+        <input id="historyMonth" type="month" value="${esc(HISTORY_MONTH)}">
+        <button class="btn secondary" id="historyThisMonth">今月</button>
+        <button class="btn ${isPrev?"green":"secondary"}" id="historyPrevYear">前年同月を表示</button>
+      </div>
+    </section>
+    <section class="card notice">
+      <strong>前年から今年へコピー</strong><br>
+      前年の発注カードにある「今年用プリセットにコピー」で、当時の商品と数量を現在のプリセット候補として複製できます。
+      発注日・納品日は自動変更せず、今年の発注時に現在の発注先ルールで再チェックします。
+    </section>
+    ${groups.length?groups.map(historyGroupCard).join(""):`<section class="card"><h3>履歴はありません</h3><p class="muted">${esc(yy)}年${esc(+mm)}月に発注ナビへ保存された発注履歴はありません。</p></section>`}`;
+}
+function historyGroupCard(g){
+  const vendors=[...new Set(g.items.map(historyVendorLabel))];
+  const totalQty=g.items.reduce((n,x)=>n+(+x.qty||0),0);
+  const canCopy=String(g.date||"").slice(0,4)!==String(today().getFullYear());
+  const title=g.runName||`発注 ${String(g.date||"").replaceAll("-","/")}`;
+  const rows=g.items.map(h=>`<div class="history-item"><div><strong>${esc(h.name||h.code)}</strong><br><span class="muted">${esc(h.code)} / ${esc(historyVendorLabel(h))}</span></div><div class="history-qty">× ${esc(h.qty)}</div></div>`).join("");
+  return `<section class="card history-card">
+    <div class="history-card-head">
+      <div><h3>${esc(title)}</h3><p class="muted">${esc(g.date||"日付不明")} / ${g.items.length}商品 / 合計数量 ${esc(totalQty)}</p></div>
+      <span class="master-badge">${esc(vendors.length)}発注先</span>
+    </div>
+    ${rows}
+    <div class="history-actions">
+      ${canCopy?`<button class="btn full" data-copy-history="${esc(g.key)}">今年用プリセットにコピー</button>`:""}
+    </div>
+  </section>`;
+}
+function historyCopyDialog(groupKey){
+  const groups=historyGroupsForMonth(HISTORY_MONTH);
+  const g=groups.find(x=>x.key===groupKey);
+  if(!g){alert("対象の履歴が見つかりません。");return}
+
+  const available=[],missing=[];
+  for(const h of g.items){
+    const p=(S.products||[]).find(p=>p.code===h.code&&!p.masterOrphan);
+    if(p)available.push({history:h,p,qty:Math.max(0,+h.qty||0)});
+    else missing.push(h);
+  }
+  const currentYear=today().getFullYear();
+  const monthDay=String(g.date||"").slice(5).replace("-","/");
+  const defaultName=`前年コピー ${currentYear}/${monthDay||"発注"}`;
+
+  modal(`<h2>前年から今年へコピー</h2>
+    <p class="muted">${esc(g.date||"日付不明")} の発注内容から、今年用のプリセットを作ります。</p>
+    <div class="field"><label>新しいプリセット名</label><input id="historyCopyName" value="${esc(defaultName)}"></div>
+    <div class="section">コピーする商品</div>
+    ${available.map(x=>`<div class="task"><div><strong>${esc(x.p.name||x.p.code)}</strong><br><span class="muted">${esc(x.p.code)} / ${esc(V(x.p.vendorId)?.name||"発注先未設定")}</span></div><div><strong>× ${esc(x.qty)}</strong></div></div>`).join("")||'<div class="error">現在の商品マスターに一致する商品がありません。</div>'}
+    ${missing.length?`<div class="notice" style="margin-top:8px"><strong>コピー対象外 ${missing.length}件</strong><br>${missing.map(x=>esc(`${x.name||x.code} (${x.code})`)).join("<br>")}<br>現在の商品マスターに同じ商品コードがないため除外します。</div>`:""}
+    <div class="notice" style="margin-top:8px">コピーするのは商品と数量だけです。前年の日付や古い納品条件はコピーしません。今年の発注時にv1.4.7以降のプレフライトで再判定します。</div>
+    <button class="btn green full" id="saveHistoryCopy" ${available.length?"":"disabled"}>今年用プリセットを作成</button>`);
+
+  $("#saveHistoryCopy").onclick=()=>{
+    const name=$("#historyCopyName").value.trim();
+    if(!name){alert("プリセット名を入力してください。");return}
+    const items=available.filter(x=>x.qty>0).map(x=>({productId:x.p.id,qty:x.qty}));
+    if(!items.length){alert("数量1以上でコピーできる商品がありません。");return}
+    checkpoint("前年履歴からプリセット作成前");
+    let unique=name,seq=2;
+    while((S.presets||[]).some(p=>p.name===unique)){unique=`${name} (${seq++})`}
+    S.presets.push({
+      id:uid(),name:unique,items,
+      copiedFromHistory:{date:g.date||null,runId:g.runId||null,copiedAt:new Date().toISOString()}
+    });
+    save("前年履歴から今年用プリセット作成");
+    $("#modal").close();
+    view="presets";render();
+    alert(`「${unique}」を作成しました。発注前に内容を確認してください。`);
+  };
+}
 
 function dayLabels(arr){return(arr||[]).map(n=>DAYS.find(d=>d.v===n)?.l).filter(Boolean).join("・")||"未設定"}
 function vendors(){
@@ -522,7 +750,7 @@ function vendors(){
 function products(){
   return `<button class="btn secondary small" data-nav="home">← ホーム</button><div class="section">商品</div>
   <section class="card"><p class="muted">商品コード・商品名・発注先は共通マスター。数量・発注間隔・最初の発注日は利用者ごとに保存されます。</p><div class="grid2"><button class="btn" id="domImport">Infomartの商品行から追加（PC推奨）</button><button class="btn secondary" id="batchOcr">スクショの商品表から追加（補助）</button><button class="btn secondary" id="addProduct">手動登録</button></div></section>
-  ${S.products.map(p=>`<section class="card ${p.masterOrphan?"danger-zone":""}"><h3>${esc(p.name||p.code)}</h3>${p.imageSource?`<img src="${esc(p.imageSource.startsWith("data:image/png;base64,")?p.imageSource:"")}" alt="登録した元画像の行" style="max-width:100%"><p>${p.domSource?"画像由来・DOM完全一致照合済み":"画像由来・DOM未確認（仮登録）"}</p>`:""}<div class="muted">商品コード ${esc(p.code)}</div><p>数量 ${esc(p.defaultQty)} / ${esc(intLabel(p))} / 最短${esc(lead(p))}日後${V(p.vendorId)?.scheduleMode==="dated"?` / ${esc(scheduleClassLabel(p.scheduleClass||"standard"))}`:""}</p><p class="muted">発注先：${esc(V(p.vendorId)?.name||"未設定")}</p>${p.masterOrphan?'<p class="error">共通マスターから削除済み。発注には使われません。</p>':""}<button class="btn secondary small" data-ep="${p.id}">個人設定を編集</button> <button class="btn secondary small" data-emp="${p.id}">共通情報を管理者編集</button></section>`).join("")}`
+  ${S.products.map(p=>`<section class="card ${p.masterOrphan?"danger-zone":""}"><h3>${esc(p.name||p.code)}</h3>${p.imageSource?`<img src="${esc(p.imageSource.startsWith("data:image/png;base64,")?p.imageSource:"")}" alt="登録した元画像の行" style="max-width:100%"><p>${p.domSource?"画像由来・DOM完全一致照合済み":"画像由来・DOM未確認（仮登録）"}</p>`:""}<div class="muted">商品コード ${esc(p.code)}</div><p>数量 ${esc(p.defaultQty)} / ${esc(intLabel(p))} / 数量${p.allowDecimalQty===true?"小数可":"整数のみ"} / 最短${esc(lead(p))}日後${V(p.vendorId)?.scheduleMode==="dated"?` / ${esc(scheduleClassLabel(p.scheduleClass||"standard"))}`:""}</p><p class="muted">発注先：${esc(V(p.vendorId)?.name||"未設定")}</p>${p.masterOrphan?'<p class="error">共通マスターから削除済み。発注には使われません。</p>':""}<button class="btn secondary small" data-ep="${p.id}">個人設定を編集</button> <button class="btn secondary small" data-emp="${p.id}">共通情報を管理者編集</button></section>`).join("")}`
 }
 function presets(){
   return `<button class="btn secondary small" data-nav="home">← ホーム</button><div class="section">発注プリセット</div><section class="card"><p class="muted">${esc(activeProfile().name)}専用のプリセットです。</p><div class="notice">プリセット実行時に、商品ごとの発注先を分けて締切・最短納品日・紙スケジュールを自動確認してから数量入力へ進みます。</div><div style="height:8px"></div><button class="btn full" id="addPreset">＋ プリセットを作る</button></section>${S.presets.map(pr=>`<section class="card"><h3>${esc(pr.name)}</h3><p>${pr.items.length}商品</p><div class="row wrap"><button class="btn green" data-run="${pr.id}">このプリセットで発注開始</button><button class="btn secondary small" data-epr="${pr.id}">編集</button></div></section>`).join("")}`
@@ -544,7 +772,7 @@ function settings(){
 function render(){
   if($("#profileName"))$("#profileName").textContent=activeProfile()?.name||"利用者";
   if($("#adminBtn")){$("#adminBtn").textContent=adminActive()?"🔓":"🔒";$("#adminBtn").classList.toggle("admin-on",adminActive())}
-  let m=$("#main");m.innerHTML=view==="home"?home():view==="today"?todayView():view==="vendors"?vendors():view==="products"?products():view==="presets"?presets():view==="paper"?paperPage():view==="mobile"?mobileHelperPage():settings();
+  let m=$("#main");m.innerHTML=view==="home"?home():view==="today"?todayView():view==="history"?historyPage():view==="vendors"?vendors():view==="products"?products():view==="presets"?presets():view==="paper"?paperPage():view==="mobile"?mobileHelperPage():settings();
   if(view==="backup"||view==="admin"){
     const keep=view==="backup"?["backupSection"]:["adminSection","masterSection"];
     $$("#main > section").forEach(el=>{if(!keep.includes(el.id))el.remove()});
@@ -572,6 +800,8 @@ function bind(){
   $("#addPreset")?.addEventListener("click",()=>presetDialog());
   $("#todayAuto")?.addEventListener("click",runToday);
   $("#pendingDone")?.addEventListener("click",completePendingRun);
+  $("#pendingVerify")?.addEventListener("click",verifyPendingReceipt);
+  $("#pendingOverride")?.addEventListener("click",async()=>{if(!(await requireAdmin("手入力の数量確認を承認")))return;if(!S.pendingRun)return;const typed=prompt("Infomart画面で全商品の数量を目視確認した場合だけ「確認済み」と入力してください。");if(typed!=="確認済み"){alert("一致しないため承認しません");return}S.pendingRun.verificationOverride=true;S.pendingRun.verificationOverrideAt=new Date().toISOString();save("手入力数量を管理者確認")});
   $("#pendingClear")?.addEventListener("click",()=>{S.pendingRun=null;save("保留発注を解除")});
   $("#manageUsers")?.addEventListener("click",()=>userSelector(false));
   $("#healthDetails")?.addEventListener("click",healthDialog);
@@ -588,6 +818,12 @@ function bind(){
   $("#copyIosMobile")?.addEventListener("click",()=>copyMobileAsset("./mobile-shortcut.js","iPhone / iPad用ショートカットJS"));
   $("#copyAndroidMobile")?.addEventListener("click",()=>copyMobileAsset("./mobile-bookmarklet.txt","Android用ブックマークレット"));
   $("#copyBookmarkMobile")?.addEventListener("click",()=>copyMobileAsset("./mobile-bookmarklet.txt","ブックマークレット"));
+  $("#openHistory")?.addEventListener("click",()=>{HISTORY_MONTH=currentYM();view="history";render()});
+  $("#openPrevYearMonth")?.addEventListener("click",()=>{HISTORY_MONTH=previousYearSameMonth();view="history";render()});
+  $("#historyThisMonth")?.addEventListener("click",()=>{HISTORY_MONTH=currentYM();render()});
+  $("#historyPrevYear")?.addEventListener("click",()=>{HISTORY_MONTH=previousYearSameMonth();render()});
+  $("#historyMonth")?.addEventListener("change",e=>{if(/^\d{4}-\d{2}$/.test(e.target.value)){HISTORY_MONTH=e.target.value;render()}});
+  $$("[data-copy-history]").forEach(b=>b.onclick=()=>historyCopyDialog(b.dataset.copyHistory));
 }
 
 function modal(h){
@@ -609,23 +845,23 @@ function vendorDialog(id){
 
 function productMasterDialog(id){
   let existing=id?MP(id):null,p=existing?clone(existing):{id:uid(),code:"",name:"",vendorId:ROOT.commonMaster.vendors[0]?.id||"",leadDaysOverride:null,scheduleClass:"standard"};
-  modal(`<h2>${id?"共通商品を編集":"共通商品を追加"}</h2><div class="field"><label>商品コード</label><input id="mc" ${p.domSource||p.imageSource?"readonly":""} value="${esc(p.code)}"></div><div class="field"><label>商品名</label><input id="mn" ${p.domSource||p.imageSource?"readonly":""} value="${esc(p.name)}"></div><div class="field"><label>発注先</label><select id="mv"><option value="">選択</option>${ROOT.commonMaster.vendors.map(v=>`<option value="${v.id}" ${p.vendorId===v.id?"selected":""}>${esc(v.name)}</option>`).join("")}</select></div><div class="field"><label>商品だけ最短納品日数が違う場合</label><input id="ml" type="number" min="0" value="${p.leadDaysOverride??""}" placeholder="空欄なら発注先設定"></div><div class="field"><label>紙スケジュール区分</label><select id="msc"><option value="standard" ${String(p.scheduleClass||"standard")==="standard"?"selected":""}>通常</option>${[...new Set(ROOT.commonMaster.vendors.flatMap(v=>(v.scheduleEntries||[]).map(x=>String(x.classKey||"standard"))))].filter(x=>x!=="standard").map(x=>`<option value="${esc(x)}" ${String(p.scheduleClass||"standard")===x?"selected":""}>${esc(scheduleClassLabel(x))}</option>`).join("")}</select><span class="help">紙に5日前 / 8日前 / 10日前などの区分がある商品だけ変更します。</span></div><div class="notice">数量・発注間隔・最初の発注日は各利用者が個別設定できます。</div><button class="btn full" id="sm">保存</button>${id?'<button class="btn red full" id="dm" style="margin-top:8px">共通マスターから削除</button>':""}`);
+  modal(`<h2>${id?"共通商品を編集":"共通商品を追加"}</h2><div class="field"><label>商品コード</label><input id="mc" ${p.domSource||p.imageSource?"readonly":""} value="${esc(p.code)}"></div><div class="field"><label>商品名</label><input id="mn" ${p.domSource||p.imageSource?"readonly":""} value="${esc(p.name)}"></div><div class="field"><label>発注先</label><select id="mv"><option value="">選択</option>${ROOT.commonMaster.vendors.map(v=>`<option value="${v.id}" ${p.vendorId===v.id?"selected":""}>${esc(v.name)}</option>`).join("")}</select></div><div class="field"><label>商品だけ最短納品日数が違う場合</label><input id="ml" type="number" min="0" value="${p.leadDaysOverride??""}" placeholder="空欄なら発注先設定"></div><label class="check"><input id="mdec" type="checkbox" ${p.allowDecimalQty===true?"checked":""}><strong>数量に小数を許可する</strong>（通常はOFF）</label><div class="field"><label>紙スケジュール区分</label><select id="msc"><option value="standard" ${String(p.scheduleClass||"standard")==="standard"?"selected":""}>通常</option>${[...new Set(ROOT.commonMaster.vendors.flatMap(v=>(v.scheduleEntries||[]).map(x=>String(x.classKey||"standard"))))].filter(x=>x!=="standard").map(x=>`<option value="${esc(x)}" ${String(p.scheduleClass||"standard")===x?"selected":""}>${esc(scheduleClassLabel(x))}</option>`).join("")}</select><span class="help">紙に5日前 / 8日前 / 10日前などの区分がある商品だけ変更します。</span></div><div class="notice">数量・発注間隔・最初の発注日は各利用者が個別設定できます。</div><button class="btn full" id="sm">保存</button>${id?'<button class="btn red full" id="dm" style="margin-top:8px">共通マスターから削除</button>':""}`);
   if(p.domSource)showDomRow(p.domSource,$("#modalBody"));
-  $("#sm").onclick=()=>{let code=$("#mc").value.trim(),vendorId=$("#mv").value;if(!/^\d{7,13}$/.test(code)||!vendorId){alert("7〜13桁の商品コードと発注先を確認してください");return}if(p.domSource){try{validateDomRow(p.domSource);if(code!==p.domSource.code)throw Error("DOMコード不一致")}catch(e){alert(e.message);return}}if(ROOT.commonMaster.products.some(x=>x.code===code&&x.id!==p.id)){alert("同じ商品コードがあります");return}checkpoint("商品マスター変更前");Object.assign(p,{code,name:p.domSource?p.domSource.name:p.imageSource?p.name:$("#mn").value.trim(),vendorId,leadDaysOverride:$("#ml").value===""?null:+$("#ml").value,scheduleClass:$("#msc").value||"standard"});if(id){let i=ROOT.commonMaster.products.findIndex(x=>x.id===id);ROOT.commonMaster.products[i]=p}else ROOT.commonMaster.products.push(p);ROOT.masterVersion++;syncMasterToProfiles();save("商品マスター更新");$("#modal").close()};
+  $("#sm").onclick=()=>{let code=$("#mc").value.trim(),vendorId=$("#mv").value;if(!/^\d{7,13}$/.test(code)||!vendorId){alert("7〜13桁の商品コードと発注先を確認してください");return}if(p.domSource){try{validateDomRow(p.domSource);if(code!==p.domSource.code)throw Error("DOMコード不一致")}catch(e){alert(e.message);return}}if(ROOT.commonMaster.products.some(x=>x.code===code&&x.id!==p.id)){alert("同じ商品コードがあります");return}checkpoint("商品マスター変更前");Object.assign(p,{code,name:p.domSource?p.domSource.name:p.imageSource?p.name:$("#mn").value.trim(),vendorId,leadDaysOverride:$("#ml").value===""?null:+$("#ml").value,scheduleClass:$("#msc").value||"standard",allowDecimalQty:$("#mdec").checked});if(id){let i=ROOT.commonMaster.products.findIndex(x=>x.id===id);ROOT.commonMaster.products[i]=p}else ROOT.commonMaster.products.push(p);ROOT.masterVersion++;syncMasterToProfiles();save("商品マスター更新");$("#modal").close()};
   $("#dm")?.addEventListener("click",()=>{if(!confirm("全利用者の共通商品から外します。個人設定は安全のため孤立データとして残します。続けますか？"))return;checkpoint("商品マスター削除前");ROOT.commonMaster.products=ROOT.commonMaster.products.filter(x=>x.id!==id);ROOT.masterVersion++;syncMasterToProfiles();save("商品マスター削除");$("#modal").close()})
 }
 
 function productPersonalDialog(id){
   let p=P(id);if(!p)return;
-  modal(`<h2>個人設定：${esc(p.name||p.code)}</h2><div class="summary-box">商品コード：<strong>${esc(p.code)}</strong><br>発注先：${esc(V(p.vendorId)?.name||"未設定")}<br>最短納品：${esc(lead(p))}日後</div><div class="field"><label>通常数量</label><input id="pq" type="number" min="0" value="${esc(p.defaultQty)}"></div><div class="field"><label>発注間隔</label><div class="pill"><button type="button" id="daily" class="${p.intervalMode==="daily"?"active":""}">毎日</button><button type="button" id="nday" class="${p.intervalMode!=="daily"?"active":""}">○日ごと</button></div><div id="nwrap" class="${p.intervalMode==="daily"?"hidden":""}" style="margin-top:8px"><input id="pi" type="number" min="1" max="60" value="${esc(p.intervalDays||2)}"></div></div><div class="field"><label>最初の発注日</label><input id="pf" type="date" value="${esc(p.firstOrderDate)}"></div><div id="ex" class="example"></div><label class="check"><input id="pa" type="checkbox" ${p.active!==false?"checked":""}>発注予定へ自動追加</label><button class="btn full" id="sp">保存</button>`);
+  modal(`<h2>個人設定：${esc(p.name||p.code)}</h2><div class="summary-box">商品コード：<strong>${esc(p.code)}</strong><br>発注先：${esc(V(p.vendorId)?.name||"未設定")}<br>最短納品：${esc(lead(p))}日後</div><div class="field"><label>通常数量</label><input id="pq" type="number" min="0" step="${p.allowDecimalQty===true?"any":"1"}" value="${esc(p.defaultQty)}"></div><div class="field"><label>発注間隔</label><div class="pill"><button type="button" id="daily" class="${p.intervalMode==="daily"?"active":""}">毎日</button><button type="button" id="nday" class="${p.intervalMode!=="daily"?"active":""}">○日ごと</button></div><div id="nwrap" class="${p.intervalMode==="daily"?"hidden":""}" style="margin-top:8px"><input id="pi" type="number" min="1" max="60" value="${esc(p.intervalDays||2)}"></div></div><div class="field"><label>最初の発注日</label><input id="pf" type="date" value="${esc(p.firstOrderDate)}"></div><div id="ex" class="example"></div><label class="check"><input id="pa" type="checkbox" ${p.active!==false?"checked":""}>発注予定へ自動追加</label><button class="btn full" id="sp">保存</button>`);
   let mode=p.intervalMode||"daily";function ref(){$("#daily").classList.toggle("active",mode==="daily");$("#nday").classList.toggle("active",mode!=="daily");$("#nwrap").classList.toggle("hidden",mode==="daily");let f=parseDate($("#pf").value||iso(today())),step=mode==="daily"?1:Math.max(1,+$("#pi").value||1);$("#ex").innerHTML=`<strong>${fmt(f)} → ${fmt(add(f,step))} → ${fmt(add(f,step*2))}</strong><br><span class="muted">${mode==="daily"?"毎日":step+"日ごと"}の例</span>`}$("#daily").onclick=()=>{mode="daily";ref()};$("#nday").onclick=()=>{mode="n";ref()};$("#pi").oninput=ref;$("#pf").onchange=ref;ref();
-  $("#sp").onclick=()=>{checkpoint("個人商品設定変更前");Object.assign(p,{defaultQty:Math.max(0,+$("#pq").value||0),intervalMode:mode,intervalDays:mode==="daily"?1:Math.max(1,+$("#pi").value||1),firstOrderDate:$("#pf").value||iso(today()),active:p.imageSource?false:$("#pa").checked,confirmed:!p.imageSource});save("個人商品設定変更");$("#modal").close()}
+  $("#sp").onclick=()=>{const q=+$("#pq").value;if(!Number.isFinite(q)||q<0||(p.allowDecimalQty!==true&&!Number.isInteger(q))){alert(p.allowDecimalQty===true?"数量を確認してください":"この商品は整数数量だけ入力できます");return}checkpoint("個人商品設定変更前");Object.assign(p,{defaultQty:q,intervalMode:mode,intervalDays:mode==="daily"?1:Math.max(1,+$("#pi").value||1),firstOrderDate:$("#pf").value||iso(today()),active:p.imageSource?false:$("#pa").checked,confirmed:!p.imageSource});save("個人商品設定変更");$("#modal").close()}
 }
 
 function presetDialog(id){
   let pr=id?S.presets.find(x=>x.id===id):{id:uid(),name:"新しいプリセット",items:[]};
-  modal(`<h2>${id?"プリセット編集":"プリセット作成"}</h2><div class="field"><label>プリセット名</label><input id="prn" value="${esc(pr.name)}"></div><p class="muted">${esc(activeProfile().name)}専用です。</p>${S.products.filter(p=>!p.masterOrphan).map(p=>{let it=pr.items.find(i=>i.productId===p.id);return `<div class="card" style="box-shadow:none"><label class="check"><input type="checkbox" data-c="${p.id}" ${it?"checked":""}><strong>${esc(p.name||p.code)}</strong> ${esc(p.code)}</label><input type="number" min="0" data-q="${p.id}" value="${esc(it?.qty??p.defaultQty??1)}"></div>`}).join("")}<button class="btn full" id="spr">保存</button>${id?'<button class="btn red full" id="dpr" style="margin-top:8px">削除</button>':""}`);
-  $("#spr").onclick=()=>{let name=$("#prn").value.trim(),items=$$("[data-c]:checked",$("#modalBody")).map(c=>({productId:c.dataset.c,qty:Math.max(0,+$(`[data-q="${c.dataset.c}"]`,$("#modalBody")).value||0)}));if(!name||!items.length){alert("名前と商品を確認してください");return}checkpoint("プリセット変更前");Object.assign(pr,{name,items});if(!id)S.presets.push(pr);save("プリセット保存");$("#modal").close()};
+  modal(`<h2>${id?"プリセット編集":"プリセット作成"}</h2><div class="field"><label>プリセット名</label><input id="prn" value="${esc(pr.name)}"></div><p class="muted">${esc(activeProfile().name)}専用です。</p>${S.products.filter(p=>!p.masterOrphan).map(p=>{let it=pr.items.find(i=>i.productId===p.id);return `<div class="card" style="box-shadow:none"><label class="check"><input type="checkbox" data-c="${p.id}" ${it?"checked":""}><strong>${esc(p.name||p.code)}</strong> ${esc(p.code)}</label><input type="number" min="0" step="${p.allowDecimalQty===true?"any":"1"}" data-q="${p.id}" value="${esc(it?.qty??p.defaultQty??1)}"></div>`}).join("")}<button class="btn full" id="spr">保存</button>${id?'<button class="btn red full" id="dpr" style="margin-top:8px">削除</button>':""}`);
+  $("#spr").onclick=()=>{let name=$("#prn").value.trim(),items=[];for(const c of $$("[data-c]:checked",$("#modalBody"))){const p=P(c.dataset.c),q=+$(`[data-q="${c.dataset.c}"]`,$("#modalBody")).value;if(!Number.isFinite(q)||q<0||(p?.allowDecimalQty!==true&&!Number.isInteger(q))){alert(`${p?.name||p?.code||"商品"} の数量を確認してください。通常は整数のみです。`);return}items.push({productId:c.dataset.c,qty:q})}if(!name||!items.length){alert("名前と商品を確認してください");return}checkpoint("プリセット変更前");Object.assign(pr,{name,items});if(!id)S.presets.push(pr);save("プリセット保存");$("#modal").close()};
   $("#dpr")?.addEventListener("click",()=>{if(!confirm("このプリセットを削除しますか？"))return;checkpoint("プリセット削除前");S.presets=S.presets.filter(x=>x.id!==id);save("プリセット削除");$("#modal").close()})
 }
 
@@ -633,27 +869,79 @@ function duplicateTodayCodes(items){
   const t=iso(today()),set=new Set((S.history||[]).filter(h=>h.date===t&&h.status==="completed").map(h=>h.code));
   return items.filter(i=>set.has(i.code));
 }
+function normalizePayloadQty(q,allowDecimal){
+  const s=String(q??"").trim(),rx=allowDecimal?/^\d+(?:\.\d+)?$/:/^\d+$/;
+  if(!rx.test(s)||!Number.isFinite(Number(s))||Number(s)<0)throw new Error(allowDecimal?"数量が不正です":"整数でない数量があります");
+  return Number(s);
+}
 async function startDialog(payload,es){
-  for(const item of payload.items){const mp=ROOT.commonMaster.products.find(p=>p.code===item.code);if(mp?.imageSource){alert("画像由来の商品はDOM未確認です。DOM商品として登録し直してください。");return}if(mp?.domSource){try{validateDomRow(mp.domSource);if(item.code!==mp.domSource.code)throw Error("コード不一致")}catch(err){alert("FAIL-CLOSED："+err.message);return}}}
-  const dup=duplicateTodayCodes(payload.items);
+  const transferItems=[];
+  for(const item of payload.items){
+    const mp=ROOT.commonMaster.products.find(p=>p.code===item.code);
+    if(!mp){alert(`FAIL-CLOSED：商品コード ${item.code} が共通マスターにありません`);return}
+    if(mp.imageSource&&!mp.domSource){alert("画像由来の商品はDOM未確認です。DOM商品として登録し直してください。");return}
+    if(!mp.domSource){alert(`FAIL-CLOSED：商品 ${item.code} は実DOM本人確認情報がありません。DOM取り込み経路で登録し直してください。`);return}
+    try{validateDomRow(mp.domSource);if(item.code!==mp.domSource.code)throw Error("コード不一致")}catch(err){alert("FAIL-CLOSED："+err.message);return}
+    let qty;try{qty=normalizePayloadQty(item.qty,mp.allowDecimalQty===true)}catch(err){alert(`FAIL-CLOSED：${item.name||item.code} — ${err.message}`);return}
+    transferItems.push({
+      code:item.code,qty,name:item.name||mp.name||item.code,
+      allowDecimalQty:mp.allowDecimalQty===true,
+      identity:{name:mp.domSource.name||mp.name||"",specification:mp.domSource.specification||mp.specification||"",vendorDisplay:mp.domSource.vendorDisplay||mp.vendorDisplay||""}
+    });
+  }
+  const dup=duplicateTodayCodes(transferItems);
   if(dup.length){
     const names=dup.map(x=>x.name||x.code).join("\n");
     if(!confirm(`本日すでに発注済みの商品があります。\n\n${names}\n\n追加発注として続けますか？`))return;
     if(!(await requireAdmin("二重発注警告を解除して追加発注")))return;
   }
-  const runId=uid(),transferPayload={...payload,runId,createdAt:new Date().toISOString()},code=encodePayload(transferPayload),warnings=[];
-  for(let e of es){let ea=earliest(acceptance(e.v),e.p,e.v);if(nowMin()>hm(e.v.cutoff))warnings.push(`${e.p.name||e.p.code}：${e.v.cutoff}締切超過。今からの最短納品は${fmt(ea)}です。`)}
-  modal(`<h2>${esc(payload.name)}</h2><div class="notice"><strong>自動化範囲</strong><br>商品コード完全一致 → 数量入力まで。納品日と最終確定は本人が確認します。<br>スマホはInfomartが開いた後に「Infomart数量入力」ヘルパーを実行してください。</div>${warnings.length?`<div class="error">${warnings.map(esc).join("<br>")}</div>`:""}<div class="section">入力する商品</div><div class="summary-box">${payload.items.map(i=>`<div>${esc(i.name||i.code)} <strong>× ${esc(i.qty)}</strong><br><span class="muted">${esc(i.code)}</span></div>`).join("<hr>")}</div><button class="btn green full" id="copyOpen">数量データをコピーしてInfomartを開く</button>`);
-  $("#copyOpen").onclick=async()=>{if(!await clip(code))prompt("下のデータをコピーしてください",code);S.pendingRun={id:runId,name:payload.name,startedAt:new Date().toISOString(),items:payload.items,entryKeys:(es||[]).map(e=>e.key)};save("発注開始");$("#modal").close();let u=S.settings.infomartUrl||DEFAULT_URL;window.open(u+(u.includes("#")?"&":"#")+"ifm="+encodeURIComponent(code),"_blank")}
+  for(let e of es||[]){
+    if(e.safetyIssue){alert(`FAIL-CLOSED：${e.p.name||e.p.code} — ${e.safetyIssue}`);return}
+    const accepted=acceptance(e.v),ea=earliest(accepted,e.p,e.v);
+    if(!accepted||!ea){alert(`FAIL-CLOSED：${e.p.name||e.p.code} の発注日または納品日を安全に計算できません。発注先設定を確認してください。`);return}
+  }
+  const runId=uid(),createdAt=new Date().toISOString(),expiresAt=new Date(Date.now()+PAYLOAD_TTL_MS).toISOString();
+  const transferPayload={payloadVersion:2,name:payload.name,items:transferItems,runId,createdAt,expiresAt},code=encodePayload(transferPayload),warnings=[];
+  for(let e of es||[]){let accepted=acceptance(e.v),ea=earliest(accepted,e.p,e.v);if(nowMin()>hm(e.v.cutoff))warnings.push(`${e.p.name||e.p.code}：${e.v.cutoff}締切超過。今からの最短納品は${fmt(ea)}です。`)}
+  modal(`<h2>${esc(payload.name)}</h2><div class="notice"><strong>自動化範囲</strong><br>商品コード＋商品名＋規格＋発注先の一致確認 → 数量入力まで。納品日と最終確定は本人が確認します。<br><strong>数量データの有効時間は60分です。</strong> 古いデータは自動停止します。</div>${warnings.length?`<div class="error">${warnings.map(esc).join("<br>")}</div>`:""}<div class="section">入力する商品</div><div class="summary-box">${transferItems.map(i=>`<div>${esc(i.name||i.code)} <strong>× ${esc(i.qty)}</strong><br><span class="muted">${esc(i.code)}</span></div>`).join("<hr>")}</div><button class="btn green full" id="copyOpen">数量データをコピーしてInfomartを開く</button>`);
+  $("#copyOpen").onclick=async()=>{if(!await clip(code))prompt("下のデータをコピーしてください",code);S.pendingRun={id:runId,name:payload.name,startedAt:createdAt,expiresAt,items:transferItems,entryKeys:(es||[]).map(e=>e.key),inputVerified:{},verificationOverride:false};save("発注開始");$("#modal").close();let u=S.settings.infomartUrl||DEFAULT_URL;window.open(u+(u.includes("#")?"&":"#")+"ifm="+encodeURIComponent(code),"_blank")}
+}
+function decodeTagged(raw,prefix){
+  if(typeof raw!=="string"||!raw.trim().startsWith(prefix))throw new Error("形式が違います");
+  let encoded=raw.trim().slice(prefix.length).replace(/-/g,"+").replace(/_/g,"/");while(encoded.length%4)encoded+="=";
+  return JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(Uint8Array.from(atob(encoded),c=>c.charCodeAt(0))));
+}
+async function verifyPendingReceipt(){
+  const r=S.pendingRun;if(!r)return;
+  let raw="";try{raw=(await navigator.clipboard.readText()||"").trim()}catch(_){}
+  if(!raw.startsWith(RECEIPT_PFX))raw=String(prompt("Infomartの数量入力結果画面で「入力結果コードをコピー」を押し、そのコードを貼り付けてください。","")||"").trim();
+  if(!raw)return;
+  try{
+    const receipt=decodeTagged(raw,RECEIPT_PFX);
+    if(receipt?.receiptVersion!==1||receipt.runId!==r.id||!Array.isArray(receipt.items))throw new Error("今回の発注と一致する入力結果ではありません");
+    const ft=Date.parse(receipt.finishedAt||"");if(!Number.isFinite(ft)||Date.now()-ft>RECEIPT_TTL_MS||ft-Date.now()>5*60*1000)throw new Error("入力結果コードが古い、または日時が不正です");
+    const expected=new Map(r.items.map(i=>[String(i.code),String(i.qty)])),seen=new Set();
+    for(const it of receipt.items){
+      const code=String(it.code||""),qty=String(it.qty??"");
+      if(!expected.has(code)||expected.get(code)!==qty)throw new Error(`商品 ${code||"(不明)"} の数量が今回の発注と一致しません`);
+      if(seen.has(code))throw new Error(`入力結果内の商品コードが重複しています：${code}`);seen.add(code);
+    }
+    r.inputVerified=r.inputVerified||{};
+    for(const it of receipt.items)r.inputVerified[String(it.code)]=String(it.qty);
+    r.lastReceiptAt=new Date().toISOString();save("数量入力結果を照合");
+    const n=pendingVerifiedCount(r);alert(`数量入力結果を照合しました：${n}/${r.items.length}件`);
+  }catch(err){alert("入力結果を確認できません："+err.message)}
 }
 function completePendingRun(){
   const r=S.pendingRun;if(!r)return;
-  if(!confirm("Infomartで最終発注確定まで完了しましたか？"))return;
+  const all=pendingVerifiedCount(r)===r.items.length;
+  if(!all&&r.verificationOverride!==true){alert("数量入力結果が全件確認できていません。先に「数量入力結果コードを確認」を行ってください。");return}
+  if(!confirm("Infomartで納品日・数量・対象商品を確認し、最終発注確定まで完了しましたか？"))return;
   checkpoint("発注済み記録前");
-  const date=iso(today());
-  const entryKeys=new Set(r.entryKeys||[]);
+  const date=iso(today()),entryKeys=new Set(r.entryKeys||[]),verification=r.verificationOverride===true?"admin-manual-override":"helper-receipt";
   for(const item of r.items){
-    S.history.push({id:uid(),runId:r.id,key:[...entryKeys].find(k=>k.startsWith((S.products.find(p=>p.code===item.code)?.id||"")+"|"))||null,code:item.code,name:item.name,qty:item.qty,date,status:"completed",recordedAt:new Date().toISOString()});
+    const hp=S.products.find(p=>p.code===item.code),hv=V(hp?.vendorId);
+    S.history.push({id:uid(),runId:r.id,runName:r.name||"",key:[...entryKeys].find(k=>k.startsWith((hp?.id||"")+"|"))||null,productId:hp?.id||null,vendorId:hv?.id||null,vendorName:hv?.name||"",code:item.code,name:item.name,qty:item.qty,date,status:"completed",inputVerification:verification,recordedAt:new Date().toISOString()});
   }
   S.pendingRun=null;save("発注済み記録");
   alert("発注済みとして記録しました。")
@@ -662,7 +950,7 @@ function completePendingRun(){
 function encodePayload(p){let bytes=new TextEncoder().encode(JSON.stringify(p)),bin="";bytes.forEach(b=>bin+=String.fromCharCode(b));return PFX+btoa(bin).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"")}
 function guide(){modal(`<h2>数量自動入力ヘルパー</h2><div class="card" style="box-shadow:none"><h3>Windows</h3><p>Chrome / Edge拡張を使用します。現在の商品一覧ページへ商品コード完全一致で数量入力します。別ページは手動で開いて再実行します。</p></div><div class="card" style="box-shadow:none"><h3>スマホ</h3><p>ホームの「スマホ自動入力」からiPhone / iPad用ショートカット、またはAndroid用ブックマークレットを設定できます。</p></div><div class="notice">数量欄のみを変更します。ページ送り・納品日選択・注文確定は自動操作しません。</div>`)}
 async function clip(s){try{await navigator.clipboard.writeText(s);return true}catch{return false}}
-function startOne(k){let e=entries().find(x=>x.key===k);if(e)startDialog({name:"1件発注",items:[{code:e.p.code,qty:e.p.defaultQty,name:e.p.name}]},[e])}
+function startOne(k){let e=entries().find(x=>x.key===k);if(!e)return;if(e.safetyIssue){alert("安全停止："+e.safetyIssue);return}startDialog({name:"1件発注",items:[{code:e.p.code,qty:e.p.defaultQty,name:e.p.name}]},[e])}
 function runToday(){let c=classify(),es=[...c.overdue,...c.due];startDialog({name:"今日の発注",items:es.map(e=>({code:e.p.code,qty:e.p.defaultQty,name:e.p.name}))},es)}
 
 function fmtDateISO(s){
@@ -680,6 +968,7 @@ function preflightItemForPreset(item){
   const now=today();
   const cutoffPassed=nowMin()>hm(v.cutoff||"13:30");
   const acceptedOrderDate=acceptance(v);
+  if(!acceptedOrderDate)return {ok:false,reason:`発注可能日が${OPEN_DATE_SEARCH_DAYS}日以内に見つかりません（設定を確認）`,item,p,v,cutoffPassed};
 
   if(v.scheduleMode==="dated"){
     const next=nextDatedScheduleAfter(acceptedOrderDate,p,v);
@@ -702,6 +991,7 @@ function preflightItemForPreset(item){
   }
 
   const deliveryDate=earliest(acceptedOrderDate,p,v);
+  if(!deliveryDate)return {ok:false,reason:`納品可能日が${OPEN_DATE_SEARCH_DAYS}日以内に見つかりません（設定を確認）`,item,p,v,cutoffPassed,orderDate:acceptedOrderDate};
   return {
     ok:true,item,p,v,cutoffPassed,
     orderDate:acceptedOrderDate,
@@ -821,8 +1111,8 @@ function mobileHelperPage(){
     <button class="btn full" id="copyAndroidMobile">Android用ブックマークレットをコピー</button>
   </section>
   <section class="card"><h3>普段の使い方</h3>
-    <ol><li>発注ナビで「数量データをコピーしてInfomartを開く」</li><li>Infomartの商品一覧 <strong>order_my_catalog.page</strong> を開く</li><li>上で設定した「Infomart数量入力」を実行</li><li>商品コード完全一致の数量欄だけ入力</li><li>別ページの商品が残っていれば、次ページを手動で開いてもう一度実行</li><li>全件入力後、数量・納品日・金額を確認して本人が最終確定</li></ol>
-    <div class="notice">スマホヘルパーはページ送り・納品日選択・注文確定を自動操作しません。InfomartのDOM構造が既知の契約と違う場合は安全停止します。</div>
+    <ol><li>発注ナビで「数量データをコピーしてInfomartを開く」</li><li>Infomartの商品一覧 <strong>order_my_catalog.page</strong> を開く</li><li>上で設定した「Infomart数量入力」を実行</li><li>商品コード・商品名・規格・発注先が一致した商品の数量欄だけ入力</li><li>別ページの商品が残っていれば、次ページを手動で開いてもう一度実行</li><li>全件入力後「入力結果コードをコピー」→発注ナビで照合</li><li>数量・納品日・金額を確認して本人が最終確定</li></ol>
+    <div class="notice">数量データは作成から60分だけ有効です。ページ送り・納品日選択・注文確定は自動操作しません。InfomartのDOM構造や商品本人確認が一致しない場合は安全停止します。</div>
   </section>`;
 }
 async function copyMobileAsset(path,label){
@@ -1122,7 +1412,7 @@ function domMasterReviewBase(entries,reports){
       for(const x of selected){validateDomRow(x.row);if(!ROOT.commonMaster.vendors.some(v=>v.id===x.vendorId))throw Error('全選択行の発注先を割り当ててください');if(x.qty===''||!Number.isFinite(+x.qty)||+x.qty<0||+x.qty>Number.MAX_SAFE_INTEGER)throw Error('通常数量を確認してください')}
       if(!(await requireAdmin('DOMの商品を共通マスターへ追加')))return;
       checkpoint('DOM商品追加前');let n=0,duplicates=0;const added=new Set();importTransaction(()=>{
-      for(const x of selected){if(ROOT.commonMaster.products.some(p=>p.code===x.row.code)){duplicates++;continue}ROOT.commonMaster.products.push({id:uid(),code:x.row.code,name:x.row.name,vendorId:x.vendorId,leadDaysOverride:null,scheduleClass:'standard',domSource:clone(x.row)});added.add(x.row.code);n++}
+      for(const x of selected){if(ROOT.commonMaster.products.some(p=>p.code===x.row.code)){duplicates++;continue}ROOT.commonMaster.products.push({id:uid(),code:x.row.code,name:x.row.name,vendorId:x.vendorId,leadDaysOverride:null,scheduleClass:'standard',allowDecimalQty:false,domSource:clone(x.row)});added.add(x.row.code);n++}
       if(n){ROOT.masterVersion++;syncMasterToProfiles();for(const x of selected){const p=S.products.find(p=>p.code===x.row.code);if(p&&added.has(x.row.code))p.defaultQty=+x.qty}save('DOM商品追加')}});
       $('#modal').close();alert(`${n}件追加／登録済み ${duplicates}件スキップ。次ページも同じ手順で取り込めます。`);
     }catch(err){result.textContent=err.message}
@@ -1227,7 +1517,7 @@ function screenshotReview(items,reports,profileId){
       if(ACTIVE_ID!==profileId)throw Error('利用者が変わりました');
       const before=clone(ROOT);checkpoint('商品表スクショ仮登録前');
       try{
-        for(const i of selected){const x=items[i],c=controls[i];if(ROOT.commonMaster.products.some(p=>p.code===x.code))throw Error('登録中にコードが重複しました');ROOT.commonMaster.products.push({id:uid(),code:x.code,name:x.name,specification:x.specification,vendorDisplay:x.vendorDisplay,vendorId:c.vendor.value,leadDaysOverride:null,scheduleClass:'standard',imageSource:x.image,codeAuthority:'image-reviewed-provisional',screenshotSource:{schemaVersion:1,file:x.file,row:x.row,geometry:x.geometry,raw:x.raw,confidence:x.confidence,manual:x.manual,reviewedAt:new Date().toISOString()},domSyncStatus:'pending'})}
+        for(const i of selected){const x=items[i],c=controls[i];if(ROOT.commonMaster.products.some(p=>p.code===x.code))throw Error('登録中にコードが重複しました');ROOT.commonMaster.products.push({id:uid(),code:x.code,name:x.name,specification:x.specification,vendorDisplay:x.vendorDisplay,vendorId:c.vendor.value,leadDaysOverride:null,scheduleClass:'standard',allowDecimalQty:false,imageSource:x.image,codeAuthority:'image-reviewed-provisional',screenshotSource:{schemaVersion:1,file:x.file,row:x.row,geometry:x.geometry,raw:x.raw,confidence:x.confidence,manual:x.manual,reviewedAt:new Date().toISOString()},domSyncStatus:'pending'})}
         ROOT.masterVersion++;syncMasterToProfiles(false);for(const i of selected){const p=S.products.find(p=>p.code===items[i].code);p.defaultQty=+controls[i].qty.value;p.active=false;p.confirmed=false}save('商品表スクショ仮登録');
       }catch(e){ROOT=before;S=activeProfile().data;throw Error('保存できませんでした（空き容量を含め確認してください）：'+e.message)}
       $('#modal').close();alert(`${selected.length}件を画像付きで仮登録しました。DOM未照合・自動予定停止です。`);
