@@ -2,7 +2,7 @@
 "use strict";
 
 const SCHEMA_VERSION=3;
-const APP_VERSION="1.5.5";
+const APP_VERSION="1.5.7";
 const ROOT_KEY="infomartOrderNav.root.v3";
 const OLD_ROOT_KEY="infomartOrderNav.multiuser.v2";
 const LEGACY_KEY="infomartOrderNav.web.v1";
@@ -615,7 +615,7 @@ function homeMenu(){
     ["products","商","商品・個人設定をする","商品情報と、利用者ごとの数量・発注間隔を設定します。","cyan"],
     ["presets","プ","プリセットを作る","よく使う発注内容をセットにして、すぐ呼び出せます。","lavender"],
     ["today","予","発注予定を確認する","今日・これからの発注、締切、納品日を確認します。","green"],
-    ["history","履","発注履歴を見る","過去の発注や前年同月を確認し、今年用へコピーできます。","amber"],
+    ["history","履","前年・発注履歴を見る","前年同月の発注を確認し、今年用プリセットへコピーできます。","amber"],
     ["paper","紙","紙のスケジュールを登録","変則日程の発注期限・納品日を写真または手入力で登録します。","rose"],
     ["mobile","自","スマホ自動入力を使う","iPhone・AndroidでInfomartの数量欄へ安全に自動入力します。","cyan"],
     ["health","✓","システムチェックを見る","商品・発注先・バックアップなどの安全状態を確認します。","green"],
@@ -699,6 +699,7 @@ function guidePage(){
   <section class="guide-section" id="guide-cancel" data-guide-keywords="キャンセル 取消 取り消し 削除 外す 止める 発注していない 発注済み">
     <h2>6. キャンセル・削除で迷ったとき</h2>
     <div class="guide-cancel-grid">
+      <div class="guide-cancel-card"><b>今回だけ1回スキップ</b><span>発注予定 → 対象商品の「今回だけスキップ」。次回以降の周期はそのままです。間違えたら「スキップ解除」。</span></div>
       <div class="guide-cancel-card"><b>今後、その商品の予定を止める</b><span>商品・個人設定 → 個人設定を編集 → 「発注予定へ自動追加」をOFF → 保存</span></div>
       <div class="guide-cancel-card"><b>プリセットから1商品だけ外す</b><span>プリセット編集 → 対象商品のチェックを外す → 保存</span></div>
       <div class="guide-cancel-card"><b>プリセット全部を消す</b><span>プリセット編集 → 赤い「削除」</span></div>
@@ -706,7 +707,7 @@ function guidePage(){
       <div class="guide-cancel-card danger"><b>共通商品そのものを削除</b><span>管理者操作です。全利用者に影響します。通常の「発注をやめたい」用途では使いません。</span></div>
       <div class="guide-cancel-card danger"><b>Infomartで最終確定した後の取消</b><span>発注ナビからは取り消せません。Infomart側の注文画面・社内手順で対応します。</span></div>
     </div>
-    <div class="error"><strong>今回だけ1回スキップ</strong>する専用ボタンは現行版にはありません。1回だけ休みたい時に共通商品を削除しないでください。</div>
+    <div class="success"><strong>今回だけ1回スキップ</strong>：発注予定画面で対象商品の「今回だけスキップ」を押します。その1回だけ予定から外れ、次回以降の周期は変わりません。間違えた場合は「スキップ済み」から解除できます。</div>
   </section>
 
   <section class="guide-section" id="guide-order" data-guide-keywords="発注予定 発注開始 数量自動入力 未発注 発注済み 納品日 最終確定">
@@ -746,6 +747,59 @@ function guidePage(){
   <section class="card guide-last"><h2>迷ったら「削除」より「止める」を先に</h2><p>発注を止めたいだけなら、共通商品や発注先を削除せず、個人設定の自動追加OFF・プリセットのチェック解除・「まだ発注していない」を使います。</p><button class="btn full" data-nav="home">TOPへ戻る</button></section>`;
 }
 
+
+function skippedEntryFromKey(key){
+  const s=String(key||""),cut=s.lastIndexOf("|");
+  if(cut<=0)return null;
+  const productId=s.slice(0,cut),dateText=s.slice(cut+1);
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(dateText))return null;
+  const p=P(productId);if(!p)return null;
+  const v=V(p.vendorId),scheduled=parseDate(dateText);
+  if(!v)return {key:s,p,v:null,scheduled,due:scheduled,delivery:null};
+  let due,delivery;
+  if(v.scheduleMode==="dated"&&(v.scheduleEntries||[]).length){
+    const exact=exactScheduleEntry(scheduled,p,v);
+    due=new Date(scheduled);
+    delivery=exact?parseDate(exact.deliveryDate):earliest(scheduled,p,v);
+  }else{
+    due=orderOpen(scheduled,v)?scheduled:prevOrder(scheduled,v);
+    delivery=due?earliest(due,p,v):null;
+  }
+  return {key:s,p,v,scheduled,due,delivery};
+}
+function skippedEntries(){
+  const min=add(today(),-45),max=add(today(),60);
+  return [...new Set(S.canceled||[])].map(skippedEntryFromKey).filter(Boolean)
+    .filter(e=>e.scheduled>=min&&e.scheduled<=max)
+    .sort((a,b)=>a.scheduled-b.scheduled);
+}
+function skipOnce(key){
+  const e=entries().find(x=>x.key===key);
+  if(!e){alert("この発注予定が見つかりません。画面を更新してもう一度確認してください。");return}
+  const msg=`${e.p.name||e.p.code}\n発注予定：${fmtF(e.due)}${e.v?.cutoff?` ${e.v.cutoff}`:""}\n\nこの1回だけスキップします。\n次回以降の発注周期・商品設定・プリセットは変更しません。`;
+  if(!confirm(msg+"\n\nよろしいですか？"))return;
+  checkpoint("今回だけ1回スキップ前");
+  S.canceled=Array.isArray(S.canceled)?S.canceled:[];
+  if(!S.canceled.includes(key))S.canceled.push(key);
+  save("今回だけ1回スキップ");
+}
+function unskipOnce(key){
+  const e=skippedEntryFromKey(key);
+  const label=e?`${e.p.name||e.p.code} / ${fmtF(e.scheduled)}`:key;
+  if(!confirm(`${label}\n\nスキップを解除して発注予定へ戻しますか？`))return;
+  checkpoint("1回スキップ解除前");
+  S.canceled=(S.canceled||[]).filter(x=>x!==key);
+  save("今回だけ1回スキップ解除");
+}
+function skippedPanel(){
+  const list=skippedEntries();
+  if(!list.length)return"";
+  return `<section class="card skipped-panel">
+    <div class="skipped-panel-head"><div><h3>今回だけスキップ済み</h3><p class="muted">ここにある予定だけを除外しています。次回以降の周期は変わりません。</p></div><span class="badge">${list.length}件</span></div>
+    ${list.map(e=>`<div class="skipped-row"><div><strong>${esc(e.p.name||e.p.code)}</strong><br><span class="muted">${esc(e.p.code)} / ${esc(e.v?.name||"発注先不明")} / 対象 ${esc(fmtF(e.scheduled))}</span></div><button class="btn secondary small" data-unskip="${esc(e.key)}">スキップ解除</button></div>`).join("")}
+  </section>`;
+}
+
 function todayEntriesWithStatus(){
   const c=classify();
   return [
@@ -780,7 +834,7 @@ function todayTableRow(e){
     <td>${e.delivery?esc(fmtF(e.delivery)):"—"}</td>
     <td><strong>${esc(e.p.name||e.p.code)}</strong><br><span class="table-sub">${esc(e.p.code)} / ${esc(intLabel(e.p))}</span>${issue?`<div class="table-error">${esc(issue)}</div>`:""}</td>
     <td>${esc(e.p.defaultQty??0)}</td>
-    <td><button class="btn secondary small" data-one="${esc(e.key)}">${e.uiStatus==="due"||e.uiStatus==="overdue"?"発注開始":"確認"}</button></td>
+    <td><div class="order-actions"><button class="btn secondary small" data-one="${esc(e.key)}">${e.uiStatus==="due"||e.uiStatus==="overdue"?"発注開始":"確認"}</button><button class="btn secondary small skip-once-btn" data-skip="${esc(e.key)}">今回だけスキップ</button></div></td>
   </tr>`;
 }
 function todayMobileCard(e){
@@ -791,7 +845,7 @@ function todayMobileCard(e){
     <div class="order-mobile-code">${esc(e.p.code)}</div>
     <div class="order-mobile-grid"><span>発注予定</span><strong>${esc(fmtF(e.due))} ${esc(e.v.cutoff||"")}</strong><span>納品予定</span><strong>${e.delivery?esc(fmtF(e.delivery)):"—"}</strong><span>数量</span><strong>${esc(e.p.defaultQty??0)}</strong></div>
     ${issue?`<div class="table-error">${esc(issue)}</div>`:""}
-    <button class="btn ${e.uiStatus==="due"||e.uiStatus==="overdue"?"":"secondary"} full" data-one="${esc(e.key)}">${e.uiStatus==="due"||e.uiStatus==="overdue"?"発注開始":"内容を確認"}</button>
+    <button class="btn ${e.uiStatus==="due"||e.uiStatus==="overdue"?"":"secondary"} full" data-one="${esc(e.key)}">${e.uiStatus==="due"||e.uiStatus==="overdue"?"発注開始":"内容を確認"}</button><button class="btn secondary full skip-once-btn" data-skip="${esc(e.key)}" style="margin-top:7px">今回だけスキップ</button>
   </article>`;
 }
 function todayView(){
@@ -814,6 +868,7 @@ function todayView(){
       <div class="order-list-summary"><strong>${rows.length}件表示</strong><span class="muted">Infomartでの納品日選択・最終確定は手動です。</span></div>
       ${rows.length?`<div class="order-table-wrap"><table class="order-table"><thead><tr><th>状態</th><th>発注日・締切</th><th>発注先</th><th>納品日</th><th>商品</th><th>数量</th><th>操作</th></tr></thead><tbody>${rows.map(todayTableRow).join("")}</tbody></table></div><div class="order-mobile-list">${rows.map(todayMobileCard).join("")}</div>`:'<div class="empty-state">条件に合う発注予定はありません。</div>'}
     </section>
+    ${skippedPanel()}
     <section class="card today-primary-action"><div><h3>今日必要な商品をまとめて自動入力</h3><p class="muted">今日・締切超過の対象だけを安全確認してInfomart数量入力へ進みます。</p></div><button class="btn" id="todayAuto" ${(!c.due.length&&!c.overdue.length)?"disabled":""}>数量自動入力の準備</button></section>`;
 }
 
@@ -861,7 +916,7 @@ function historyPage(){
     <section class="card history-toolbar">
       <div>
         <h3>${esc(yy)}年${esc(+mm)}月の発注</h3>
-        <p class="muted">発注ナビで「発注済み」にした履歴を表示します。</p>
+        <p class="muted">発注ナビで「発注済み」にした履歴を表示します。</p><div class="notice history-scope-note"><strong>前年について：</strong>この画面に出るのは発注ナビに記録された履歴です。発注ナビ導入前のInfomart注文履歴は自動では入ってきません。</div>
       </div>
       <div class="history-controls">
         <input id="historyMonth" type="month" value="${esc(HISTORY_MONTH)}">
@@ -1031,6 +1086,8 @@ function bind(){
   $("#returnHealth")?.addEventListener("click",healthDialog);
   $$("[data-paper-open]").forEach(b=>b.onclick=()=>scheduleViewDialog(b.dataset.paperOpen));
   $$("[data-one]").forEach(b=>b.onclick=()=>startOne(b.dataset.one));
+  $$("[data-skip]").forEach(b=>b.onclick=()=>skipOnce(b.dataset.skip));
+  $$("[data-unskip]").forEach(b=>b.onclick=()=>unskipOnce(b.dataset.unskip));
   $$("[data-ev]").forEach(b=>b.onclick=async()=>{if(await requireAdmin("発注先マスターを編集"))vendorDialog(b.dataset.ev)});
   $$("[data-schedule-import]").forEach(b=>b.onclick=async()=>{if(await requireAdmin("紙スケジュールを読み込む")){SCHEDULE_VENDOR_ID=b.dataset.scheduleImport;$("#scheduleOcrFiles").click()}});
   $$("[data-schedule-view]").forEach(b=>b.onclick=()=>scheduleViewDialog(b.dataset.scheduleView));
