@@ -2,7 +2,7 @@
 "use strict";
 
 const SCHEMA_VERSION=3;
-const APP_VERSION="1.6.2";
+const APP_VERSION="1.6.3";
 const ROOT_KEY="infomartOrderNav.root.v3";
 const OLD_ROOT_KEY="infomartOrderNav.multiuser.v2";
 const LEGACY_KEY="infomartOrderNav.web.v1";
@@ -24,6 +24,7 @@ let CATALOG_PRESET_ID="";
 let CATALOG_SELECTION=new Set();
 let CALENDAR_MONTH=iso(today()).slice(0,7);
 let CALENDAR_FILTER="all";
+let CALENDAR_TRADE_STORE="all";
 
 const $=(s,r=document)=>r.querySelector(s);
 const $$=(s,r=document)=>Array.from(r.querySelectorAll(s));
@@ -39,6 +40,7 @@ function workspaceDefault(){
     history:[],
     canceled:[],
     quantityOverrides:{},
+    infomartTrade:{months:[],days:[]},
     pendingRun:null
   };
 }
@@ -66,6 +68,10 @@ function normalizeWorkspace(x){
     history:Array.isArray(x.history)?x.history:[],
     canceled:Array.isArray(x.canceled)?x.canceled:[],
     quantityOverrides:x.quantityOverrides&&typeof x.quantityOverrides==="object"&&!Array.isArray(x.quantityOverrides)?x.quantityOverrides:{},
+    infomartTrade:{
+      months:Array.isArray(x.infomartTrade?.months)?x.infomartTrade.months:[],
+      days:Array.isArray(x.infomartTrade?.days)?x.infomartTrade.days:[]
+    },
     pendingRun:x.pendingRun||null
   };
 }
@@ -757,8 +763,8 @@ function guidePage(){
 
   <section class="guide-section" id="guide-calendar" data-guide-keywords="取引カレンダー 月 発注 納品 発注済み スキップ">
     <h2>10. 取引カレンダーを見る</h2>
-    <ol class="guide-numbered"><li>TOP → <strong>取引カレンダーを見る</strong>。</li><li>月を切り替えると、発注予定・納品予定・発注済み・今回だけスキップを日ごとに確認できます。</li><li>日付を押すと、その日の商品と発注先の内訳を表示します。</li><li>上部の表示切替で「発注だけ」「納品だけ」などに絞り込めます。</li></ol>
-    <div class="notice"><strong>表示元：</strong>発注ナビに登録された予定・履歴です。Infomartの取引カレンダーをリアルタイム同期する機能ではありません。</div>
+    <ol class="guide-numbered"><li>TOP → <strong>取引カレンダーを見る</strong>。</li><li>月を切り替えると、発注予定・納品予定・発注済み・今回だけスキップを日ごとに確認できます。</li><li>Infomartの実績も重ねる場合は、PC拡張 v1.6.3でInfomartの<strong>取引カレンダー（月）を保存</strong>し、発注ナビの「Infomart取引JSONを取り込む」から読み込みます。</li><li>商品明細まで見たい日は、Infomartカレンダーの「一覧」を開き、拡張の<strong>この日の取引明細を保存</strong>を実行して同じ取込ボタンから読み込みます。</li><li>日付を押すと、発注ナビ側の予定とInfomartの件数・取引先・商品コード・商品名・規格・数量をまとめて確認できます。</li></ol>
+    <div class="notice"><strong>同期方式：</strong>リアルタイム同期ではありません。JSONを取り込んだ時点のInfomart実績スナップショットを安全に保持します。</div>
   </section>
 
   <section class="guide-section" id="guide-backup" data-guide-keywords="バックアップ 復元 共通マスター JSON LINE 別スマホ 機種変更 データ">
@@ -967,27 +973,177 @@ function calendarHistoryEvents(ym){
   }
   return out;
 }
+function tradeState(){
+  if(!S.infomartTrade||typeof S.infomartTrade!=="object")S.infomartTrade={months:[],days:[]};
+  if(!Array.isArray(S.infomartTrade.months))S.infomartTrade.months=[];
+  if(!Array.isArray(S.infomartTrade.days))S.infomartTrade.days=[];
+  return S.infomartTrade;
+}
+function tradeNorm(s){return String(s??"").normalize("NFKC").replace(/[　\s]+/g," ").trim()}
+function tradeStoreName(v){return tradeNorm(v)||"店舗不明"}
+function tradeStoreShort(v){
+  let s=tradeStoreName(v);if(s==="店舗不明")return s;
+  s=s.replace(/（[^）]*）|\([^)]*\)/g,"").trim().replace(/^麻布あさひ[　\s]*/,"").trim();
+  return s||tradeStoreName(v);
+}
+function tradeStoreFromDiagnostic(pkg){
+  if(pkg?.storeName)return tradeStoreName(pkg.storeName);
+  const raw=String(pkg?.pageTextPreview||pkg?.pageText||"");
+  const before=tradeNorm(raw.split("マイページ")[0]);
+  return tradeStoreName(before||"店舗不明");
+}
+function tradeDate(s){const m=String(s||"").match(/(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);return m?`${m[1]}-${String(+m[2]).padStart(2,"0")}-${String(+m[3]).padStart(2,"0")}`:""}
+function tradeNumber(s){const n=Number(String(s??"").replace(/[,，\s]/g,""));return Number.isFinite(n)?n:null}
+function tradeStatusLabel(code,src=""){
+  const s=String(src||"");
+  if(/hatu/i.test(s)||String(code)==="40")return "発注";
+  if(/sou/i.test(s)||String(code)==="60")return "発送";
+  if(/jiri/i.test(s)||String(code)==="80")return "受領";
+  return `状態${code||"不明"}`;
+}
+function parseInfomartTradeCalendarDiagnostic(pkg){
+  if(pkg?.captureVersion!=="infomart-trade-calendar-dom-v1"||pkg?.page?.origin!=="https://www2.infomart.co.jp"||pkg?.page?.pathname!=="/employment/trade_calendar.page")throw Error("Infomart取引カレンダーDOMのJSONではありません");
+  const text=String(pkg.pageTextPreview||pkg.pageText||""),mm=text.match(/(\d{4})年\s*(\d{1,2})月\s*表示/);
+  if(!mm)throw Error("表示年月を判定できません");
+  const ym=`${mm[1]}-${String(+mm[2]).padStart(2,"0")}`,storeName=tradeStoreFromDiagnostic(pkg),days=[];
+  const seen=new Set();
+  for(const table of pkg.tables||[]){
+    if(!String(table?.className||"").includes("cal-week"))continue;
+    for(const row of table.rows||[])for(const cell of row.cells||[]){
+      if(cell?.id!=="dayDetailInfoContainer")continue;
+      const links=cell.links||[];let date="";
+      for(const a of links){const m=String(a?.onclick||"").match(/OpenSchedule_NewInp\('[^']*',(\d{4}),(\d{1,2}),(\d{1,2}),/);if(m){date=`${m[1]}-${String(+m[2]).padStart(2,"0")}-${String(+m[3]).padStart(2,"0")}`;break}}
+      if(!date||!date.startsWith(ym)||seen.has(date))continue;seen.add(date);
+      const statuses=[],statusSeen=new Set();
+      for(const a of links){
+        const m=String(a?.onclick||"").match(/OpenDeliveryWindow\((\d{4}),(\d{1,2}),(\d{1,2}),'(\d+)'/),n=tradeNumber(a?.text);
+        if(!m||m[4]==="0"||n===null||!/^\d+$/.test(String(a?.text||"").trim())||statusSeen.has(m[4]))continue;
+        const img=(cell.images||[]).map(x=>String(x?.src||"")).find(src=>src.includes("ic-cld-"))||"";
+        statuses.push({code:m[4],label:tradeStatusLabel(m[4],img),count:n});statusSeen.add(m[4]);
+      }
+      days.push({date,holiday:String(cell.text||"").includes("祝日"),today:String(cell.className||"").includes("cal-today"),statuses,
+        hasList:links.some(a=>a?.title==="取引一覧"),hasReport:links.some(a=>a?.title==="納品予定一覧出力")});
+    }
+  }
+  return {kind:"month",schemaVersion:"infomart-trade-calendar-export-v1",source:"diagnostic-json",exportedAt:pkg.capturedAt||new Date().toISOString(),storeName,ym,days};
+}
+function parseInfomartTradeListDiagnostic(pkg){
+  if(pkg?.captureVersion!=="infomart-trade-calendar-dom-v1"||pkg?.page?.origin!=="https://www2.infomart.co.jp"||pkg?.page?.pathname!=="/employment/delivery_list_window.page")throw Error("Infomart取引一覧DOMのJSONではありません");
+  const storeName=tradeStoreFromDiagnostic(pkg),table=(pkg.tables||[]).find(t=>String(t?.className||"").includes("data-list02-tbl"));
+  if(!table?.rows?.length)throw Error("取引一覧テーブルが見つかりません");
+  let date="";try{const q=new URLSearchParams(String(pkg?.page?.search||"").replace(/^\?/,""));date=tradeDate(q.get("f_date")||q.get("t_date")||"")}catch(_){}
+  const statusCounts=[];
+  for(const a of pkg.links||[]){const m=String(a?.text||"").match(/^(.+?)\s*(\d+)件$/);if(/^status\d+$/.test(String(a?.id||""))&&m)statusCounts.push({id:a.id,label:tradeNorm(m[1]),count:+m[2]})}
+  const rows=table.rows||[],orders=[];let i=0;
+  while(i<rows.length){
+    const row=rows[i],c=row.cells||[],first=String(c[0]?.className||"");
+    if(c.length&&first.includes("listtd-hdr-cell-")){
+      const order={status:tradeNorm(c[0]?.text),slipNo:tradeNorm(c[1]?.text),slipDate:tradeDate(c[2]?.text),vendor:tradeNorm(c[3]?.text),staff:tradeNorm(c[4]?.text),items:[]};
+      const det=(c[5]?.links||[]).find(a=>a?.id==="tradeDetailOpen"),id=String(det?.onclick||"").match(/mfOpenTradeDetail\('([^']+)'/);if(id)order.sourceTradeId=id[1];
+      i++;
+      if(i<rows.length){const m=rows[i].cells||[];if(m.length>=4&&!String(m[0]?.className||"").includes("listtd-hdr-cell-")){Object.assign(order,{deliveryDate:tradeDate(m[0]?.text),orderDateTime:tradeNorm(m[1]?.text),deliveryPlace:tradeNorm(m[2]?.text),total:tradeNumber(m[3]?.text)});if(!date)date=order.deliveryDate;i++}}
+      if(i<rows.length&&String(rows[i]?.text||"").startsWith("件名：")){order.subject=tradeNorm(String(rows[i].text).replace(/^件名：/,""));i++}
+      while(i<rows.length){
+        const r=rows[i],x=r.cells||[],cl=String(x[0]?.className||"");
+        if(!x.length)break;if(cl.includes("listtd-space")){i++;break}if(cl.includes("listtd-hdr-cell-"))break;
+        if((cl.includes("listtd-odd")||cl.includes("listtd-even"))&&x.length>=6){
+          const rawName=tradeNorm(x[1]?.text),taxReduced=/\s軽減$/.test(rawName);
+          order.items.push({code:tradeNorm(x[0]?.text),name:rawName.replace(/\s軽減$/,"").trim(),taxReduced,specification:tradeNorm(x[2]?.text),unitPrice:tradeNumber(x[3]?.text),qty:tradeNumber(x[4]?.text),unit:tradeNorm(x[5]?.text)});i++;
+        }else i++;
+      }
+      if(order.slipNo&&order.items.length)orders.push(order);continue;
+    }
+    i++;
+  }
+  if(!date&&orders[0]?.deliveryDate)date=orders[0].deliveryDate;
+  if(!date)throw Error("対象日を判定できません");
+  return {kind:"day",schemaVersion:"infomart-trade-list-export-v1",source:"diagnostic-json",exportedAt:pkg.capturedAt||new Date().toISOString(),storeName,date,statusCounts,orders,complete:true};
+}
+function normalizeInfomartTradePackage(pkg){
+  if(pkg?.schemaVersion==="infomart-trade-calendar-export-v1"&&Array.isArray(pkg.days))return {kind:"month",...clone(pkg),storeName:tradeStoreName(pkg.storeName)};
+  if(pkg?.schemaVersion==="infomart-trade-list-export-v1"&&Array.isArray(pkg.orders))return {kind:"day",...clone(pkg),storeName:tradeStoreName(pkg.storeName),date:tradeDate(pkg.date)};
+  if(pkg?.captureVersion==="infomart-trade-calendar-dom-v1"){
+    if(pkg?.page?.pathname==="/employment/trade_calendar.page")return parseInfomartTradeCalendarDiagnostic(pkg);
+    if(pkg?.page?.pathname==="/employment/delivery_list_window.page")return parseInfomartTradeListDiagnostic(pkg);
+  }
+  throw Error("対応していないInfomart取引JSONです");
+}
+function tradeStoreValues(){
+  const t=tradeState(),vals=[...new Set([...(t.months||[]).map(x=>tradeStoreName(x.storeName)),...(t.days||[]).map(x=>tradeStoreName(x.storeName))])];
+  return vals.filter(Boolean).sort((a,b)=>tradeStoreShort(a).localeCompare(tradeStoreShort(b),"ja"));
+}
+function tradeMonthSnapshots(ym){return (tradeState().months||[]).filter(x=>x.ym===ym&&(CALENDAR_TRADE_STORE==="all"||tradeStoreName(x.storeName)===CALENDAR_TRADE_STORE))}
+function tradeDayDetails(date){return (tradeState().days||[]).filter(x=>x.date===date&&(CALENDAR_TRADE_STORE==="all"||tradeStoreName(x.storeName)===CALENDAR_TRADE_STORE))}
+function calendarInfomartEvents(ym){
+  const out=[],seen=new Set();
+  for(const snap of tradeMonthSnapshots(ym))for(const day of snap.days||[])for(const st of day.statuses||[]){
+    const count=Math.max(0,+st.count||0);if(!count)continue;
+    const k=`${tradeStoreName(snap.storeName)}|${day.date}|${st.code||st.label}`;seen.add(k);out.push({date:day.date,type:"infomart",storeName:tradeStoreName(snap.storeName),statusCode:String(st.code||""),statusLabel:tradeNorm(st.label)||tradeStatusLabel(st.code),count,holiday:day.holiday===true,label:`${tradeNorm(st.label)||tradeStatusLabel(st.code)} ${count}件`});
+  }
+  for(const det of (tradeState().days||[]).filter(x=>String(x.date||"").slice(0,7)===ym&&(CALENDAR_TRADE_STORE==="all"||tradeStoreName(x.storeName)===CALENDAR_TRADE_STORE))){
+    const counts=(det.statusCounts||[]).filter(x=>(+x.count||0)>0);
+    if(counts.length){for(const st of counts){const code=String(st.code||st.id||""),k=`${tradeStoreName(det.storeName)}|${det.date}|${code||st.label}`;if(seen.has(k))continue;out.push({date:det.date,type:"infomart",storeName:tradeStoreName(det.storeName),statusCode:code,statusLabel:tradeNorm(st.label)||"取引",count:+st.count||0,label:`${tradeNorm(st.label)||"取引"} ${+st.count||0}件`})}}
+    else if((det.orders||[]).length){const k=`${tradeStoreName(det.storeName)}|${det.date}|orders`;if(!seen.has(k))out.push({date:det.date,type:"infomart",storeName:tradeStoreName(det.storeName),statusCode:"",statusLabel:"取引",count:det.orders.length,label:`取引 ${det.orders.length}件`})}
+  }
+  return out;
+}
+function importInfomartTradePackage(pkg,label){
+  const p=normalizeInfomartTradePackage(pkg),t=tradeState(),now=new Date().toISOString();
+  if(p.kind==="month"){
+    const row={...p,storeName:tradeStoreName(p.storeName),importedAt:now,importSource:label||p.source||"Infomart取引カレンダー"};
+    if(!/^\d{4}-\d{2}$/.test(row.ym)||!Array.isArray(row.days))throw Error("月カレンダーの内容が不正です");
+    const idx=t.months.findIndex(x=>tradeStoreName(x.storeName)===row.storeName&&x.ym===row.ym);if(idx>=0)t.months[idx]=row;else t.months.push(row);
+    return {kind:"month",storeName:row.storeName,ym:row.ym,days:row.days.length,replaced:idx>=0};
+  }
+  const row={...p,storeName:tradeStoreName(p.storeName),date:tradeDate(p.date),importedAt:now,importSource:label||p.source||"Infomart取引一覧"};
+  if(!row.date||!Array.isArray(row.orders))throw Error("取引一覧の内容が不正です");
+  const idx=t.days.findIndex(x=>tradeStoreName(x.storeName)===row.storeName&&x.date===row.date);if(idx>=0)t.days[idx]=row;else t.days.push(row);
+  return {kind:"day",storeName:row.storeName,date:row.date,orders:row.orders.length,items:row.orders.reduce((n,o)=>n+(o.items?.length||0),0),replaced:idx>=0};
+}
+async function importInfomartTradeFiles(files){
+  const list=[...files||[]];if(!list.length)return;
+  checkpoint("Infomart取引カレンダー取り込み前");
+  let months=0,days=0,orders=0,items=0,replaced=0,errors=[];const stores=new Set();let lastYm="";
+  for(const f of list){
+    try{const r=importInfomartTradePackage(JSON.parse(await f.text()),f.name);stores.add(r.storeName);if(r.kind==="month"){months++;lastYm=r.ym}else{days++;orders+=r.orders||0;items+=r.items||0;lastYm=String(r.date||"").slice(0,7)}if(r.replaced)replaced++}
+    catch(e){errors.push(`${f.name}: ${e.message}`)}
+  }
+  if(!months&&!days){alert(`取り込めませんでした。${errors.length?`\n${errors.join("\n")}`:""}`);return}
+  save("Infomart取引カレンダー取り込み");if(lastYm)CALENDAR_MONTH=lastYm;if(stores.size===1)CALENDAR_TRADE_STORE=[...stores][0];render();
+  alert(`Infomart取引データを取り込みました。\n月カレンダー ${months}件 / 日別明細 ${days}件\n伝票 ${orders}件 / 商品明細 ${items}件${replaced?`\n既存スナップショット更新 ${replaced}件`:""}${errors.length?`\n\n読込エラー:\n${errors.join("\n")}`:""}`);
+}
 function calendarEvents(ym=CALENDAR_MONTH){
-  const all=[...calendarPlannedEntries(ym),...calendarHistoryEvents(ym)];
+  const all=[...calendarPlannedEntries(ym),...calendarHistoryEvents(ym),...calendarInfomartEvents(ym)];
   return all.sort((a,b)=>a.date.localeCompare(b.date)||String(a.label).localeCompare(String(b.label),"ja"));
 }
 function calendarVisibleEvents(){const all=calendarEvents();return CALENDAR_FILTER==="all"?all:all.filter(e=>e.type===CALENDAR_FILTER)}
-function calendarTypeLabel(t){return t==="order"?"発注予定":t==="delivery"?"納品予定":t==="completed"?"発注済み":"スキップ"}
+function calendarTypeLabel(t){return t==="order"?"発注予定":t==="delivery"?"納品予定":t==="completed"?"発注済み":t==="infomart"?"Infomart実績":"スキップ"}
+function tradeOrderHtml(o){
+  const items=(o.items||[]).slice(0,60).map(it=>`<div class="trade-import-item"><span><strong>${esc(it.name||it.code||"商品")}</strong>${it.code?`<br><span class="muted">${esc(it.code)}${it.specification?` / ${esc(it.specification)}`:""}</span>`:""}</span><span class="trade-import-qty">× ${esc(it.qty??"")}${it.unit?` ${esc(it.unit)}`:""}</span></div>`).join("");
+  return `<section class="trade-import-order"><div class="trade-import-order-head"><div><strong>${esc(o.vendor||"取引先不明")}</strong><br><span class="muted">${esc(o.status||"")}${o.slipNo?` / 伝票No.${esc(o.slipNo)}`:""}${o.orderDateTime?` / 発注 ${esc(o.orderDateTime)}`:""}</span></div><span class="master-badge">${esc((o.items||[]).length)}商品</span></div>${items||"<div class='muted'>商品明細なし</div>"}</section>`;
+}
 function calendarDayDialog(date){
-  const events=calendarVisibleEvents().filter(e=>e.date===date),cap=events.slice(0,80);
-  modal(`<h2>${esc(fmtF(parseDate(date)))}</h2>${cap.length?cap.map(e=>`<div class="calendar-detail-row ${esc(e.type)}"><span class="calendar-dot ${esc(e.type)}"></span><div><strong>${esc(calendarTypeLabel(e.type))}｜${esc(e.label)}</strong><br><span class="muted">${esc(e.v?.name||e.history?.vendorName||"発注先不明")} / 数量 ${esc(e.qty)}</span>${e.type==="order"&&hasQuantityOverride(e.key)?`<br><span class="qty-once-note">今回だけ数量修正あり（通常 ${esc(e.p?.defaultQty??0)}）</span>`:""}</div></div>`).join(""):"<div class='empty-state'>表示対象はありません。</div>"}${events.length>cap.length?`<div class="notice">ほか ${events.length-cap.length}件</div>`:""}<button class="btn full" id="calendarGoOrders">発注予定を開く</button>`);
+  const events=calendarVisibleEvents().filter(e=>e.date===date),cap=events.filter(e=>e.type!=="infomart").slice(0,80),inf=events.filter(e=>e.type==="infomart"),details=tradeDayDetails(date);
+  const localHtml=cap.length?cap.map(e=>`<div class="calendar-detail-row ${esc(e.type)}"><span class="calendar-dot ${esc(e.type)}"></span><div><strong>${esc(calendarTypeLabel(e.type))}｜${esc(e.label)}</strong><br><span class="muted">${esc(e.v?.name||e.history?.vendorName||"発注先不明")} / 数量 ${esc(e.qty)}</span>${e.type==="order"&&hasQuantityOverride(e.key)?`<br><span class="qty-once-note">今回だけ数量修正あり（通常 ${esc(e.p?.defaultQty??0)}）</span>`:""}</div></div>`).join(""):"";
+  const infHtml=inf.length?`<div class="trade-import-statuses">${inf.map(e=>`<span class="calendar-chip infomart">${esc(tradeStoreShort(e.storeName))}｜${esc(e.statusLabel)} ${esc(e.count)}件</span>`).join("")}</div>`:"";
+  const detailHtml=details.length?details.map(d=>`<div class="trade-import-day"><h3>Infomart明細｜${esc(tradeStoreShort(d.storeName))}</h3>${(d.orders||[]).slice(0,30).map(tradeOrderHtml).join("")||"<div class='muted'>明細なし</div>"}${(d.orders||[]).length>30?`<div class="notice">ほか ${(d.orders||[]).length-30}伝票</div>`:""}</div>`).join(""):inf.length?`<div class="notice"><strong>日別件数は取り込み済みです。</strong><br>商品明細も見たい場合は、Infomartのその日の「一覧」を開き、拡張機能の「この日の取引明細を保存」でJSONを取り込んでください。</div>`:"";
+  modal(`<h2>${esc(fmtF(parseDate(date)))}</h2>${localHtml}${infHtml}${detailHtml}${!events.length&&!details.length?"<div class='empty-state'>表示対象はありません。</div>":""}${events.length-cap.length-inf.length>0?`<div class="notice">ほか ${events.length-cap.length-inf.length}件</div>`:""}<button class="btn full" id="calendarGoOrders">発注予定を開く</button>`);
   $("#calendarGoOrders")?.addEventListener("click",()=>{$("#modal").close();view="today";render();window.scrollTo(0,0)});
 }
 function calendarPage(){
+  const stores=tradeStoreValues();if(CALENDAR_TRADE_STORE!=="all"&&!stores.includes(CALENDAR_TRADE_STORE))CALENDAR_TRADE_STORE="all";
   const {start,end}=calendarBounds(CALENDAR_MONTH),gridStart=add(start,-start.getDay()),gridEnd=add(end,6-end.getDay()),events=calendarVisibleEvents(),map=new Map();
   for(const e of events){if(!map.has(e.date))map.set(e.date,[]);map.get(e.date).push(e)}
-  const cells=[];for(let d=new Date(gridStart);d<=gridEnd;d=add(d,1)){const date=iso(d),dayEvents=map.get(date)||[],outside=date.slice(0,7)!==CALENDAR_MONTH,isToday=date===iso(today()),counts={order:0,delivery:0,completed:0,skipped:0};dayEvents.forEach(e=>counts[e.type]++);const chips=[["order","発注"],["delivery","納品"],["completed","済"],["skipped","休"]].filter(([k])=>counts[k]).map(([k,l])=>`<span class="calendar-chip ${k}">${l} ${counts[k]}</span>`).join("");cells.push(`<button class="calendar-cell ${outside?"outside":""} ${isToday?"today":""}" ${dayEvents.length?`data-cal-day="${date}"`:"disabled"}><span class="calendar-day-number">${d.getDate()}</span><span class="calendar-cell-events">${chips}</span></button>`)}
-  const total=t=>calendarEvents().filter(e=>e.type===t).length,[y,m]=CALENDAR_MONTH.split("-");
+  const cells=[];for(let d=new Date(gridStart);d<=gridEnd;d=add(d,1)){const date=iso(d),dayEvents=map.get(date)||[],outside=date.slice(0,7)!==CALENDAR_MONTH,isToday=date===iso(today()),counts={order:0,delivery:0,completed:0,skipped:0,infomart:0};dayEvents.forEach(e=>{if(e.type==="infomart")counts.infomart+=Math.max(0,+e.count||0);else counts[e.type]++});const chips=[["order","発注"],["delivery","納品"],["completed","済"],["skipped","休"],["infomart","Inf"]].filter(([k])=>counts[k]).map(([k,l])=>`<span class="calendar-chip ${k}">${l} ${counts[k]}</span>`).join("");const hasDetails=tradeDayDetails(date).length>0;cells.push(`<button class="calendar-cell ${outside?"outside":""} ${isToday?"today":""}" ${(dayEvents.length||hasDetails)?`data-cal-day="${date}"`:"disabled"}><span class="calendar-day-number">${d.getDate()}</span><span class="calendar-cell-events">${chips}</span></button>`)}
+  const raw=calendarEvents(),total=t=>t==="infomart"?raw.filter(e=>e.type==="infomart").reduce((n,e)=>n+(+e.count||0),0):raw.filter(e=>e.type===t).length,[y,m]=CALENDAR_MONTH.split("-");
+  const storeOptions=`<option value="all" ${CALENDAR_TRADE_STORE==="all"?"selected":""}>全店舗</option>`+stores.map(s=>`<option value="${esc(s)}" ${CALENDAR_TRADE_STORE===s?"selected":""}>${esc(tradeStoreShort(s))}</option>`).join("");
+  const imports=tradeMonthSnapshots(CALENDAR_MONTH),latest=[...(tradeState().months||[]),...(tradeState().days||[])].sort((a,b)=>String(b.importedAt||b.exportedAt||"").localeCompare(String(a.importedAt||a.exportedAt||"")))[0];
   return `<button class="btn secondary small" data-nav="home">← ホーム</button><div class="section page-title-row"><div>取引カレンダー</div><span class="version-chip">v${APP_VERSION}</span></div>
-    <section class="card calendar-toolbar"><div class="calendar-month-nav"><button class="btn secondary small" id="calendarPrev">‹ 前月</button><strong>${esc(y)}年${esc(+m)}月</strong><button class="btn secondary small" id="calendarNext">翌月 ›</button></div><div class="calendar-toolbar-actions"><button class="btn secondary small" id="calendarToday">今月</button><select id="calendarFilter"><option value="all" ${CALENDAR_FILTER==="all"?"selected":""}>すべて</option><option value="order" ${CALENDAR_FILTER==="order"?"selected":""}>発注予定だけ</option><option value="delivery" ${CALENDAR_FILTER==="delivery"?"selected":""}>納品予定だけ</option><option value="completed" ${CALENDAR_FILTER==="completed"?"selected":""}>発注済みだけ</option><option value="skipped" ${CALENDAR_FILTER==="skipped"?"selected":""}>スキップだけ</option></select></div></section>
-    <div class="calendar-summary"><span class="calendar-chip order">発注 ${total("order")}</span><span class="calendar-chip delivery">納品 ${total("delivery")}</span><span class="calendar-chip completed">発注済み ${total("completed")}</span><span class="calendar-chip skipped">スキップ ${total("skipped")}</span></div>
+    <section class="card calendar-toolbar"><div class="calendar-month-nav"><button class="btn secondary small" id="calendarPrev">‹ 前月</button><strong>${esc(y)}年${esc(+m)}月</strong><button class="btn secondary small" id="calendarNext">翌月 ›</button></div><div class="calendar-toolbar-actions"><button class="btn secondary small" id="calendarToday">今月</button><select id="calendarFilter"><option value="all" ${CALENDAR_FILTER==="all"?"selected":""}>すべて</option><option value="order" ${CALENDAR_FILTER==="order"?"selected":""}>発注予定だけ</option><option value="delivery" ${CALENDAR_FILTER==="delivery"?"selected":""}>納品予定だけ</option><option value="completed" ${CALENDAR_FILTER==="completed"?"selected":""}>発注済みだけ</option><option value="infomart" ${CALENDAR_FILTER==="infomart"?"selected":""}>Infomart実績だけ</option><option value="skipped" ${CALENDAR_FILTER==="skipped"?"selected":""}>スキップだけ</option></select>${stores.length?`<label class="calendar-store-filter">Infomart店舗 <select id="calendarTradeStore">${storeOptions}</select></label>`:""}</div></section>
+    <div class="calendar-summary"><span class="calendar-chip order">発注 ${total("order")}</span><span class="calendar-chip delivery">納品 ${total("delivery")}</span><span class="calendar-chip completed">発注済み ${total("completed")}</span><span class="calendar-chip infomart">Infomart ${total("infomart")}</span><span class="calendar-chip skipped">スキップ ${total("skipped")}</span></div>
+    <section class="card calendar-import-card"><div><h3>Infomartの取引実績を反映</h3><p class="muted">Chrome/Edge拡張 v1.6.3で「取引カレンダー（月）」または「この日の取引明細」をJSON保存し、ここへ取り込みます。診断JSONもそのまま読めます。</p></div><button class="btn full" id="calendarImportBtn">Infomart取引JSONを取り込む</button><input id="calendarImportFiles" type="file" accept=".json,application/json" multiple hidden>${latest?`<div class="trade-import-latest">最終取込：${esc(tradeStoreShort(latest.storeName))} / ${esc(latest.ym||latest.date||"")}</div>`:""}</section>
     <section class="card calendar-card"><div class="calendar-weekdays"><span class="sun">日</span><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span class="sat">土</span></div><div class="calendar-grid">${cells.join("")}</div></section>
-    <section class="card notice"><strong>このカレンダーの表示元</strong><br>発注ナビに登録された発注予定・納品予定・発注済み履歴・今回だけスキップを表示しています。Infomartの「取引カレンダー」とリアルタイム同期するものではありません。</section>`;
+    <section class="card notice"><strong>表示元</strong><br>発注ナビの予定・履歴に加え、取り込んだInfomart取引カレンダーのスナップショットを重ねて表示します。<strong>リアルタイム同期ではなく、JSONを取り込んだ時点の実績</strong>です。${imports.length?` この月は ${imports.length}店舗分の月カレンダーを保持しています。`:""}</section>`;
 }
 
 let HISTORY_MONTH=iso(today()).slice(0,7);
@@ -1492,6 +1648,9 @@ function bind(){
   $("#calendarNext")?.addEventListener("click",()=>{CALENDAR_MONTH=calendarMonthShift(CALENDAR_MONTH,1);render()});
   $("#calendarToday")?.addEventListener("click",()=>{CALENDAR_MONTH=iso(today()).slice(0,7);render()});
   $("#calendarFilter")?.addEventListener("change",e=>{CALENDAR_FILTER=e.target.value||"all";render()});
+  $("#calendarTradeStore")?.addEventListener("change",e=>{CALENDAR_TRADE_STORE=e.target.value||"all";render()});
+  $("#calendarImportBtn")?.addEventListener("click",()=>$("#calendarImportFiles")?.click());
+  $("#calendarImportFiles")?.addEventListener("change",e=>importInfomartTradeFiles(e.target.files));
   $$("[data-cal-day]").forEach(b=>b.onclick=()=>calendarDayDialog(b.dataset.calDay));
   $$("[data-ev]").forEach(b=>b.onclick=async()=>{if(await requireAdmin("発注先マスターを編集"))vendorDialog(b.dataset.ev)});
   $$("[data-schedule-import]").forEach(b=>b.onclick=async()=>{if(await requireAdmin("紙スケジュールを読み込む")){SCHEDULE_VENDOR_ID=b.dataset.scheduleImport;$("#scheduleOcrFiles").click()}});

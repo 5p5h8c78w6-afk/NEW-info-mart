@@ -1,4 +1,4 @@
-const C="infomart-order-nav-v1.6.2";
+const C="infomart-order-nav-v1.6.3";
 const A=["./","./index.html","./styles.css","./app.js","./product-table-ocr.js","./manifest.webmanifest","./initial_master.json","./icon-192.png","./icon-512.png","./mobile-helper.js","./mobile-shortcut.js","./mobile-bookmarklet.txt","./guide/guide-01-start.svg","./guide/guide-02-vendor.svg","./guide/guide-03-product.svg","./guide/guide-04-personal.svg","./guide/guide-05-preset.svg","./guide/guide-06-order.svg","./guide/guide-07-mobile.svg","./guide/guide-08-trouble.svg"];
 self.addEventListener("install",e=>e.waitUntil(caches.open(C).then(c=>c.addAll(A)).then(()=>self.skipWaiting())));
 self.addEventListener("activate",e=>e.waitUntil(caches.keys().then(keys=>Promise.all(keys.filter(k=>k.startsWith("infomart-order-nav-")&&k!==C).map(k=>caches.delete(k)))).then(()=>self.clients.claim())));
