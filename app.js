@@ -2,7 +2,7 @@
 "use strict";
 
 const SCHEMA_VERSION=3;
-const APP_VERSION="1.6.1";
+const APP_VERSION="1.6.2";
 const ROOT_KEY="infomartOrderNav.root.v3";
 const OLD_ROOT_KEY="infomartOrderNav.multiuser.v2";
 const LEGACY_KEY="infomartOrderNav.web.v1";
@@ -22,6 +22,8 @@ const CATALOG_FILTER={query:"",mine:false};
 let CATALOG_VENDOR_ID="";
 let CATALOG_PRESET_ID="";
 let CATALOG_SELECTION=new Set();
+let CALENDAR_MONTH=iso(today()).slice(0,7);
+let CALENDAR_FILTER="all";
 
 const $=(s,r=document)=>r.querySelector(s);
 const $$=(s,r=document)=>Array.from(r.querySelectorAll(s));
@@ -36,6 +38,7 @@ function workspaceDefault(){
     presets:[],
     history:[],
     canceled:[],
+    quantityOverrides:{},
     pendingRun:null
   };
 }
@@ -62,6 +65,7 @@ function normalizeWorkspace(x){
     presets:Array.isArray(x.presets)?x.presets:[],
     history:Array.isArray(x.history)?x.history:[],
     canceled:Array.isArray(x.canceled)?x.canceled:[],
+    quantityOverrides:x.quantityOverrides&&typeof x.quantityOverrides==="object"&&!Array.isArray(x.quantityOverrides)?x.quantityOverrides:{},
     pendingRun:x.pendingRun||null
   };
 }
@@ -287,6 +291,7 @@ function syncMasterToProfiles(persist=true){
     };
     d.history=(d.history||[]).map(h=>({...h,key:rewrite(h.key)}));
     d.canceled=(d.canceled||[]).map(rewrite);
+    d.quantityOverrides=Object.fromEntries(Object.entries(d.quantityOverrides||{}).map(([k,v])=>[rewrite(k),v]));
   }
   S=activeProfile().data;
   if(persist)persistRoot();
@@ -459,6 +464,17 @@ function vendorScheduleSummary(v){return v?.scheduleMode==="dated"?`紙スケジ
 
 function firstOnOrAfter(p,target){let first=parseDate(p.firstOrderDate||iso(today())),step=p.intervalMode==="daily"?1:Math.max(1,+p.intervalDays||1);if(target<=first)return first;let delta=Math.floor((target-first)/86400000),j=Math.ceil(delta/step);return add(first,j*step)}
 
+function quantityOverrideRecord(key){
+  const raw=S.quantityOverrides&&typeof S.quantityOverrides==="object"?S.quantityOverrides[key]:null;
+  if(raw==null)return null;
+  const qty=Number(typeof raw==="object"?raw.qty:raw);
+  if(!Number.isFinite(qty)||qty<0)return null;
+  return {qty,updatedAt:typeof raw==="object"?raw.updatedAt||null:null};
+}
+function orderQtyForKey(key,p){const r=quantityOverrideRecord(key);return r?r.qty:Number(p?.defaultQty??0)}
+function hasQuantityOverride(key){return Boolean(quantityOverrideRecord(key))}
+function clearQuantityOverride(key){if(S.quantityOverrides&&typeof S.quantityOverrides==="object")delete S.quantityOverrides[key]}
+
 function entries(){
   let out=[],start=add(today(),-45),end=add(today(),60);
   for(let p of S.products.filter(p=>p.active!==false&&p.confirmed!==false&&!p.masterOrphan)){
@@ -475,7 +491,8 @@ function entries(){
       }
       const safetyIssue=!due?`発注可能日が${OPEN_DATE_SEARCH_DAYS}日以内に見つかりません`:!delivery?`納品可能日が${OPEN_DATE_SEARCH_DAYS}日以内に見つかりません`:null;
       if(!S.history.some(h=>h.key===key)&&!S.canceled.includes(key)){
-        out.push({key,p,v,scheduled:new Date(d),due,delivery,safetyIssue,scheduleExact:exact,scheduleMismatch:mismatch,scheduleSuggestion:mismatch?nearestScheduleEntries(d,p,v):null});
+        const qtyOverride=quantityOverrideRecord(key);
+        out.push({key,p,v,scheduled:new Date(d),due,delivery,safetyIssue,scheduleExact:exact,scheduleMismatch:mismatch,scheduleSuggestion:mismatch?nearestScheduleEntries(d,p,v):null,qty:qtyOverride?qtyOverride.qty:Number(p.defaultQty??0),qtyOverride:Boolean(qtyOverride)});
       }
       d=add(d,step)
     }
@@ -613,36 +630,33 @@ function pendingRunCard(){
     <div class="grid2" style="margin-top:8px"><button class="btn green" id="pendingDone" ${all||override?"":"disabled"}>発注済みにする</button><button class="btn secondary" id="pendingClear">まだ発注していない</button></div></section>`
 }
 function homeMenu(){
-  const items=[
-    ["guide","？","画像つき操作ガイド","迷った時はここ。初回設定からキャンセル・削除、よくあるトラブルまで確認できます。","blue"],
-    ["catalog","選","発注先から商品を選ぶ","発注先の商品一覧から、使う商品だけ自分のプリセットへ追加します。","green"],
-    ["vendors","発","発注先を登録","取引先（発注先）の締切・納品ルールを登録・編集します。","blue"],
-    ["products","商","商品・個人設定をする","商品情報と、利用者ごとの数量・発注間隔を設定します。","cyan"],
-    ["presets","プ","プリセットを作る","よく使う発注内容をセットにして、すぐ呼び出せます。","lavender"],
-    ["today","予","発注予定を確認する","今日・これからの発注、締切、納品日を確認します。","green"],
-    ["history","履","前年・発注履歴を見る","前年同月の発注を確認し、今年用プリセットへコピーできます。","amber"],
-    ["paper","紙","紙のスケジュールを登録","変則日程の発注期限・納品日を写真または手入力で登録します。","rose"],
-    ["mobile","自","スマホ自動入力を使う","iPhone・AndroidでInfomartの数量欄へ安全に自動入力します。","cyan"],
-    ["health","✓","システムチェックを見る","商品・発注先・バックアップなどの安全状態を確認します。","green"],
-    ["backup","保","バックアップ・復元をする","発注ナビのデータを保存し、必要なときに復元します。","lavender"],
-    ["admin","管","管理者設定を開く","共通マスターや管理者向け設定を変更します。","slate"]
+  const primary=[
+    ["catalog","🛒","発注先から商品を選ぶ","発注先の商品を選んで、かんたんにプリセットへ追加します。","blue"],
+    ["today","📅","発注予定を確認する","これからの発注・締切・納品予定を確認します。","green"],
+    ["history","📄","前年・発注履歴を見る","前年同月の発注や、これまでの履歴を確認できます。","amber"],
+    ["presets","🔖","プリセットを作る","よく使う発注内容をセットにして、すぐ呼び出せます。","lavender"]
   ];
-  return `<section class="home-menu">
-    <div class="home-menu-head">
-      <div><div class="home-title">メニュー <span class="version-chip">v${APP_VERSION}</span></div><div class="home-subtitle">やりたいことを選んでください</div></div>
-    </div>
-    <div class="menu-grid">${items.map(([to,icon,label,desc,tone])=>`<button class="nav-card ${tone}" data-nav="${to}">
-      <span class="nav-icon">${esc(icon)}</span><span class="nav-copy"><strong>${esc(label)}</strong><small>${esc(desc)}</small></span><span class="nav-arrow">›</span>
-    </button>`).join("")}</div>
+  const secondary=[
+    ["calendar","▦","取引カレンダーを見る","発注・納品・発注済みを月ごとに確認"],
+    ["mobile","▣","スマホ自動入力を使う","iPhone・Androidでかんたん入力"],
+    ["paper","▤","紙のスケジュールを登録","発注期限・納品日を登録"],
+    ["guide","？","画像つき操作ガイド","はじめての方も安心"],
+    ["products","商","商品・個人設定","通常数量・発注間隔を変更"],
+    ["health","✓","システムチェックを見る","安全な状態を確認"],
+    ["backup","☁","バックアップ・復元をする","データの保存・復元"],
+    ["admin","⚙","管理者設定を開く","商品・利用者設定など"]
+  ];
+  return `<section class="friendly-home-menu">
+    <div class="friendly-menu-title"><h2>よく使うメニュー</h2><button type="button" class="friendly-all-link" id="homeAllMenuBtn">すべて見る ›</button></div>
+    <div class="friendly-primary-grid">${primary.map(([to,icon,label,desc,tone])=>`<button class="friendly-primary-card ${tone}" data-nav="${to}"><span class="friendly-primary-icon">${icon}</span><span class="friendly-primary-arrow">›</span><strong>${esc(label)}</strong><small>${esc(desc)}</small></button>`).join("")}</div>
+    <h3 class="friendly-other-title" id="homeOtherMenu">その他のメニュー</h3>
+    <div class="friendly-secondary-grid">${secondary.map(([to,icon,label,desc])=>`<button class="friendly-secondary-card" data-nav="${to}"><span class="friendly-secondary-icon">${icon}</span><span class="friendly-secondary-copy"><strong>${esc(label)}</strong><small>${esc(desc)}</small></span><span class="friendly-secondary-arrow">›</span></button>`).join("")}</div>
+    <div class="friendly-version">Infomart 発注ナビ v${APP_VERSION}</div>
   </section>`;
 }
 function home(){
-  let c=classify(),cd=countdownInfo();
-  return `<section class="guide-home-cta">
-    <div class="guide-home-icon">？</div>
-    <div class="guide-home-copy"><strong>はじめての方へ｜画像つき使い方</strong><span>発注先登録から、商品登録、プリセット、キャンセル・削除、スマホ自動入力まで細かく説明します。</span></div>
-    <button class="btn" data-nav="guide">操作ガイドを見る</button>
-  </section><section class="home-welcome"><div><div class="eyebrow-big">Infomart 発注ナビ</div><h2>やさしく、かんたんに発注業務をサポートします</h2><p>${esc(activeProfile().name)}さんの発注状況を確認して、次に必要な作業だけ進めます。</p></div></section>
+  let c=classify(),cd=countdownInfo(),name=activeProfile()?.name||"利用者";
+  return `<section class="friendly-hero"><div class="friendly-hero-copy"><span class="friendly-hello">こんにちは！</span><h2>発注業務をかんたんに、<br>スムーズに進めましょう。</h2><p>${esc(name)}さんの必要な作業を分かりやすくまとめています。</p></div><div class="friendly-hero-mark"><span>✓</span><small>今日も<br>よろしく<br>お願いします！</small></div></section>
     ${cd?`<div class="countdown ${cd.cls}"><div><strong>今日の締切</strong><br><span class="muted">最も近い締切</span></div><div class="time">${esc(cd.label)}</div></div>`:""}
     ${homeMenu()}${nextAction(c)}${pendingRunCard()}
     ${section("要対応",c.attention,"orange")}${section("発注漏れ注意",c.overdue,"red")}${section("今日の発注",c.due,"green")}
@@ -712,7 +726,7 @@ function guidePage(){
   <section class="guide-section" id="guide-cancel" data-guide-keywords="キャンセル 取消 取り消し 削除 外す 止める 発注していない 発注済み">
     <h2>6. キャンセル・削除で迷ったとき</h2>
     <div class="guide-cancel-grid">
-      <div class="guide-cancel-card"><b>今回だけ1回スキップ</b><span>発注予定 → 対象商品の「今回だけスキップ」。次回以降の周期はそのままです。間違えたら「スキップ解除」。</span></div>
+      <div class="guide-cancel-card"><b>今回だけ数量を修正</b><span>発注予定 → 「今回だけ修正」。その発注だけ数量を変え、次回は通常数量へ自動で戻ります。</span></div><div class="guide-cancel-card"><b>今回だけ1回スキップ</b><span>発注予定 → 対象商品の「今回だけスキップ」。次回以降の周期はそのままです。間違えたら「スキップ解除」。</span></div>
       <div class="guide-cancel-card"><b>今後、その商品の予定を止める</b><span>商品・個人設定 → 個人設定を編集 → 「発注予定へ自動追加」をOFF → 保存</span></div>
       <div class="guide-cancel-card"><b>プリセットから1商品だけ外す</b><span>プリセット編集 → 対象商品のチェックを外す → 保存</span></div>
       <div class="guide-cancel-card"><b>プリセット全部を消す</b><span>プリセット編集 → 赤い「削除」</span></div>
@@ -725,7 +739,7 @@ function guidePage(){
 
   <section class="guide-section" id="guide-order" data-guide-keywords="発注予定 発注開始 数量自動入力 未発注 発注済み 納品日 最終確定">
     <h2>7. 毎日の発注</h2>${guideFigure("guide-06-order.svg","毎日の発注と未発注に戻す流れ")}
-    <ol class="guide-numbered"><li>TOP → <strong>発注予定を確認する</strong>。</li><li>「今日」または「締切超過」の対象を確認。</li><li>発注先ごとの締切・最短納品・紙スケジュールを確認。</li><li>数量データをコピーしてInfomartを開き、ヘルパーを実行。</li><li>数量入力結果を発注ナビへ戻して照合。</li><li>Infomartで<strong>数量・商品・納品日・金額</strong>を本人が確認して最終確定。</li><li>完了したら「発注済みにする」。途中なら「まだ発注していない」。</li></ol>
+    <ol class="guide-numbered"><li>TOP → <strong>発注予定を確認する</strong>。</li><li>「今日」または「締切超過」の対象を確認。</li><li>その1回だけ数量を変える場合は<strong>「今回だけ修正」</strong>。次回の通常数量は変わりません。</li><li>その1回を取りやめる場合は<strong>「今回だけスキップ」</strong>。</li><li>発注先ごとの締切・最短納品・紙スケジュールを確認。</li><li>数量データをコピーしてInfomartを開き、ヘルパーを実行。</li><li>数量入力結果を発注ナビへ戻して照合。</li><li>Infomartで<strong>数量・商品・納品日・金額</strong>を本人が確認して最終確定。</li><li>完了したら「発注済みにする」。途中なら「まだ発注していない」。</li></ol>
   </section>
 
   <section class="guide-section" id="guide-mobile" data-guide-keywords="スマホ iPhone ショートカット Android ブックマークレット 自動入力 60分">
@@ -740,15 +754,22 @@ function guidePage(){
     <div class="notice">Infomartから取り込んだ履歴は納品月で表示します。前年の日付・納品条件を今年の発注条件としてはコピーしません。</div>
   </section>
 
+
+  <section class="guide-section" id="guide-calendar" data-guide-keywords="取引カレンダー 月 発注 納品 発注済み スキップ">
+    <h2>10. 取引カレンダーを見る</h2>
+    <ol class="guide-numbered"><li>TOP → <strong>取引カレンダーを見る</strong>。</li><li>月を切り替えると、発注予定・納品予定・発注済み・今回だけスキップを日ごとに確認できます。</li><li>日付を押すと、その日の商品と発注先の内訳を表示します。</li><li>上部の表示切替で「発注だけ」「納品だけ」などに絞り込めます。</li></ol>
+    <div class="notice"><strong>表示元：</strong>発注ナビに登録された予定・履歴です。Infomartの取引カレンダーをリアルタイム同期する機能ではありません。</div>
+  </section>
+
   <section class="guide-section" id="guide-backup" data-guide-keywords="バックアップ 復元 共通マスター JSON LINE 別スマホ 機種変更 データ">
-    <h2>10. 他の人へ渡す・バックアップする</h2>
+    <h2>11. 他の人へ渡す・バックアップする</h2>
     <div class="guide-two-col"><div class="card"><h3>他の人へ渡す</h3><p>① 発注ナビURL<br>② 管理者が作った<strong>共通マスターJSON</strong></p><p class="muted">共通マスターを先に読み込めば、発注先・基本商品を1件ずつ登録せずに始められます。プリセットは利用者ごとに作ります。</p></div><div class="card"><h3>全部を保存</h3><p>設定 → バックアップ/復元 → <strong>全利用者バックアップ</strong></p></div></div>
     <div class="error"><strong>注意：</strong>Infomart_DOM_...json は商品取り込み用。共通マスターJSONや全バックアップJSONとは別物です。</div>
     <div class="error"><strong>ブラウザの履歴・Webサイトデータを消す前にバックアップ。</strong>登録内容は端末/ブラウザ側に保存されます。</div>
   </section>
 
   <section class="guide-section" id="guide-trouble" data-guide-keywords="困った エラー OCR 読めない 更新 古い システムチェック 自動入力 動かない">
-    <h2>11. 困ったとき</h2>${guideFigure("guide-08-trouble.svg","システムチェックとバックアップで困った時に確認する説明図")}
+    <h2>12. 困ったとき</h2>${guideFigure("guide-08-trouble.svg","システムチェックとバックアップで困った時に確認する説明図")}
     <details open><summary>商品が一覧にない</summary><p>まず管理者へ確認してください。基本商品は共通マスターへ登録しておくのが標準です。本当に新商品・未登録商品ならスマホOCRを使います。</p></details>
     <details><summary>OCRがうまく読めない</summary><p>商品コードから右端の発注先まで全部写す／画面を少し拡大してスクショする／読取信頼度の低い項目を元画像と照合して修正します。</p></details>
     <details><summary>数量自動入力が動かない</summary><p>Safari/ChromeでInfomartの商品一覧を開いているか、初回設定済みか、数量データ作成から60分以内かを確認。本人確認不一致なら安全停止します。</p></details>
@@ -787,6 +808,25 @@ function skippedEntries(){
     .filter(e=>e.scheduled>=min&&e.scheduled<=max)
     .sort((a,b)=>a.scheduled-b.scheduled);
 }
+function oneTimeQtyDialog(key){
+  if(S.pendingRun?.entryKeys?.includes(key)){alert("この予定は現在Infomartへの入力確認中です。先に発注結果を記録するか『まだ発注していない』で解除してください。");return}
+  const e=entries().find(x=>x.key===key);
+  if(!e){alert("この発注予定が見つかりません。画面を更新してもう一度確認してください。");return}
+  const normal=Number(e.p.defaultQty??0),current=orderQtyForKey(key,e.p),override=quantityOverrideRecord(key);
+  modal(`<h2>今回だけ数量を修正</h2><div class="summary-box"><strong>${esc(e.p.name||e.p.code)}</strong><br><span class="muted">${esc(e.p.code)} / ${esc(e.v?.name||"発注先不明")}</span><br>発注予定：${esc(fmtF(e.due))} ${esc(e.v?.cutoff||"")}</div><div class="notice"><strong>今回の発注だけ</strong>数量を変更します。商品・個人設定の通常数量は変更しません。次回は通常数量へ戻ります。</div><div class="grid2"><div class="field"><label>通常数量</label><input value="${esc(normal)}" disabled></div><div class="field"><label>今回の数量</label><input id="oneTimeQty" type="number" min="0.000001" step="${e.p.allowDecimalQty===true?"any":"1"}" value="${esc(current)}" inputmode="decimal"></div></div><button class="btn green full" id="saveOneTimeQty">今回だけ数量を保存</button>${override?'<button class="btn secondary full" id="clearOneTimeQty" style="margin-top:8px">今回だけ修正を解除</button>':""}`);
+  $("#saveOneTimeQty").onclick=()=>{
+    const raw=$("#oneTimeQty").value.trim(),q=Number(raw);
+    if(!raw||!Number.isFinite(q)||q<=0){alert("今回の数量は0より大きい数字を入力してください。発注しない場合は『今回だけスキップ』を使ってください。");return}
+    if(e.p.allowDecimalQty!==true&&!Number.isInteger(q)){alert("この商品は整数数量で入力してください。");return}
+    checkpoint("今回だけ数量修正前");
+    S.quantityOverrides=S.quantityOverrides&&typeof S.quantityOverrides==="object"?S.quantityOverrides:{};
+    if(q===normal)delete S.quantityOverrides[key];
+    else S.quantityOverrides[key]={qty:q,updatedAt:new Date().toISOString()};
+    save("今回だけ数量修正");$("#modal").close();
+  };
+  $("#clearOneTimeQty")?.addEventListener("click",()=>{checkpoint("今回だけ数量修正解除前");clearQuantityOverride(key);save("今回だけ数量修正解除");$("#modal").close()});
+}
+
 function skipOnce(key){
   const e=entries().find(x=>x.key===key);
   if(!e){alert("この発注予定が見つかりません。画面を更新してもう一度確認してください。");return}
@@ -795,6 +835,7 @@ function skipOnce(key){
   checkpoint("今回だけ1回スキップ前");
   S.canceled=Array.isArray(S.canceled)?S.canceled:[];
   if(!S.canceled.includes(key))S.canceled.push(key);
+  clearQuantityOverride(key);
   save("今回だけ1回スキップ");
 }
 function unskipOnce(key){
@@ -840,26 +881,26 @@ function filteredTodayEntries(){
   });
 }
 function todayTableRow(e){
-  const issue=e.issue||e.safetyIssue;
+  const issue=e.issue||e.safetyIssue,qty=e.qty??orderQtyForKey(e.key,e.p),over=e.qtyOverride||hasQuantityOverride(e.key);
   return `<tr class="${issue?"order-row-warn":""}">
     <td>${todayStatusBadge(e)}</td>
     <td><strong>${esc(fmtF(e.due))}</strong><br><span class="table-sub">${esc(e.v.cutoff||"")}</span></td>
     <td>${esc(e.v.name||"")}</td>
     <td>${e.delivery?esc(fmtF(e.delivery)):"—"}</td>
     <td><strong>${esc(e.p.name||e.p.code)}</strong><br><span class="table-sub">${esc(e.p.code)} / ${esc(intLabel(e.p))}</span>${issue?`<div class="table-error">${esc(issue)}</div>`:""}</td>
-    <td>${esc(e.p.defaultQty??0)}</td>
-    <td><div class="order-actions"><button class="btn secondary small" data-one="${esc(e.key)}">${e.uiStatus==="due"||e.uiStatus==="overdue"?"発注開始":"確認"}</button><button class="btn secondary small skip-once-btn" data-skip="${esc(e.key)}">今回だけスキップ</button></div></td>
+    <td>${over?`<strong class="qty-once">${esc(qty)}</strong><br><span class="table-sub">通常 ${esc(e.p.defaultQty??0)}</span>`:esc(qty)}</td>
+    <td><div class="order-actions"><button class="btn secondary small" data-one="${esc(e.key)}">${e.uiStatus==="due"||e.uiStatus==="overdue"?"発注開始":"確認"}</button><button class="btn ${over?"green":"secondary"} small" data-editqty="${esc(e.key)}">${over?"今回だけ修正済み":"今回だけ修正"}</button>${over?`<button class="btn secondary small" data-clearqty="${esc(e.key)}">修正を解除</button>`:""}<button class="btn secondary small skip-once-btn" data-skip="${esc(e.key)}">今回だけスキップ</button></div></td>
   </tr>`;
 }
 function todayMobileCard(e){
-  const issue=e.issue||e.safetyIssue;
+  const issue=e.issue||e.safetyIssue,qty=e.qty??orderQtyForKey(e.key,e.p),over=e.qtyOverride||hasQuantityOverride(e.key);
   return `<article class="order-mobile-card ${issue?"warn":""}">
     <div class="order-mobile-head">${todayStatusBadge(e)}<strong>${esc(e.v.name||"")}</strong></div>
     <div class="order-mobile-product">${esc(e.p.name||e.p.code)}</div>
     <div class="order-mobile-code">${esc(e.p.code)}</div>
-    <div class="order-mobile-grid"><span>発注予定</span><strong>${esc(fmtF(e.due))} ${esc(e.v.cutoff||"")}</strong><span>納品予定</span><strong>${e.delivery?esc(fmtF(e.delivery)):"—"}</strong><span>数量</span><strong>${esc(e.p.defaultQty??0)}</strong></div>
+    <div class="order-mobile-grid"><span>発注予定</span><strong>${esc(fmtF(e.due))} ${esc(e.v.cutoff||"")}</strong><span>納品予定</span><strong>${e.delivery?esc(fmtF(e.delivery)):"—"}</strong><span>数量</span><strong class="${over?"qty-once":""}">${esc(qty)}${over?` <small>（通常 ${esc(e.p.defaultQty??0)}）</small>`:""}</strong></div>
     ${issue?`<div class="table-error">${esc(issue)}</div>`:""}
-    <button class="btn ${e.uiStatus==="due"||e.uiStatus==="overdue"?"":"secondary"} full" data-one="${esc(e.key)}">${e.uiStatus==="due"||e.uiStatus==="overdue"?"発注開始":"内容を確認"}</button><button class="btn secondary full skip-once-btn" data-skip="${esc(e.key)}" style="margin-top:7px">今回だけスキップ</button>
+    <button class="btn ${e.uiStatus==="due"||e.uiStatus==="overdue"?"":"secondary"} full" data-one="${esc(e.key)}">${e.uiStatus==="due"||e.uiStatus==="overdue"?"発注開始":"内容を確認"}</button><button class="btn ${over?"green":"secondary"} full" data-editqty="${esc(e.key)}" style="margin-top:7px">${over?"今回だけ数量を再修正":"今回だけ数量を修正"}</button>${over?`<button class="btn secondary full" data-clearqty="${esc(e.key)}" style="margin-top:7px">今回だけ修正を解除</button>`:""}<button class="btn secondary full skip-once-btn" data-skip="${esc(e.key)}" style="margin-top:7px">今回だけスキップ</button>
   </article>`;
 }
 function todayView(){
@@ -884,6 +925,69 @@ function todayView(){
     </section>
     ${skippedPanel()}
     <section class="card today-primary-action"><div><h3>今日必要な商品をまとめて自動入力</h3><p class="muted">今日・締切超過の対象だけを安全確認してInfomart数量入力へ進みます。</p></div><button class="btn" id="todayAuto" ${(!c.due.length&&!c.overdue.length)?"disabled":""}>数量自動入力の準備</button></section>`;
+}
+
+function calendarMonthShift(ym,delta){
+  const [y,m]=String(ym).split("-").map(Number),d=new Date(y,m-1+delta,1,12);
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+}
+function calendarBounds(ym){
+  const [y,m]=String(ym).split("-").map(Number);
+  return {start:new Date(y,m-1,1,12),end:new Date(y,m,0,12)};
+}
+function calendarPlannedEntries(ym){
+  const {start,end}=calendarBounds(ym),scanStart=add(start,-45),scanEnd=add(end,45),out=[];
+  for(const p of S.products.filter(p=>p.active!==false&&p.confirmed!==false&&!p.masterOrphan)){
+    const v=V(p.vendorId);if(!v||!vendorReady(v))continue;
+    let d=firstOnOrAfter(p,scanStart),step=p.intervalMode==="daily"?1:Math.max(1,+p.intervalDays||1);
+    while(d<=scanEnd){
+      const key=`${p.id}|${iso(d)}`,exact=exactScheduleEntry(d,p,v);let due,delivery;
+      if(v.scheduleMode==="dated"&&(v.scheduleEntries||[]).length){due=new Date(d);delivery=exact?parseDate(exact.deliveryDate):earliest(d,p,v)}
+      else{due=orderOpen(d,v)?new Date(d):prevOrder(d,v);delivery=due?earliest(due,p,v):null}
+      const completed=(S.history||[]).some(h=>h.key===key&&h.status==="completed"),skipped=(S.canceled||[]).includes(key),qty=orderQtyForKey(key,p);
+      if(!completed){
+        if(skipped){if(due&&iso(due).slice(0,7)===ym)out.push({date:iso(due),type:"skipped",key,p,v,qty,label:p.name||p.code})}
+        else{
+          if(due&&iso(due).slice(0,7)===ym)out.push({date:iso(due),type:"order",key,p,v,qty,label:p.name||p.code});
+          if(delivery&&iso(delivery).slice(0,7)===ym)out.push({date:iso(delivery),type:"delivery",key,p,v,qty,label:p.name||p.code});
+        }
+      }
+      d=add(d,step);
+    }
+  }
+  return out;
+}
+function calendarHistoryEvents(ym){
+  const out=[];
+  for(const h of S.history||[]){
+    const p=(S.products||[]).find(p=>p.id===h.productId||p.code===h.code),v=V(p?.vendorId),label=h.name||p?.name||h.code||"発注履歴",qty=Number(h.qty??0);
+    const od=String(h.orderDate||h.date||"").slice(0,10),dd=String(h.deliveryDate||"").slice(0,10);
+    if(/^\d{4}-\d{2}-\d{2}$/.test(od)&&od.slice(0,7)===ym)out.push({date:od,type:"completed",history:h,p,v,qty,label});
+    if(/^\d{4}-\d{2}-\d{2}$/.test(dd)&&dd.slice(0,7)===ym)out.push({date:dd,type:"delivery",history:h,p,v,qty,label,fromHistory:true});
+  }
+  return out;
+}
+function calendarEvents(ym=CALENDAR_MONTH){
+  const all=[...calendarPlannedEntries(ym),...calendarHistoryEvents(ym)];
+  return all.sort((a,b)=>a.date.localeCompare(b.date)||String(a.label).localeCompare(String(b.label),"ja"));
+}
+function calendarVisibleEvents(){const all=calendarEvents();return CALENDAR_FILTER==="all"?all:all.filter(e=>e.type===CALENDAR_FILTER)}
+function calendarTypeLabel(t){return t==="order"?"発注予定":t==="delivery"?"納品予定":t==="completed"?"発注済み":"スキップ"}
+function calendarDayDialog(date){
+  const events=calendarVisibleEvents().filter(e=>e.date===date),cap=events.slice(0,80);
+  modal(`<h2>${esc(fmtF(parseDate(date)))}</h2>${cap.length?cap.map(e=>`<div class="calendar-detail-row ${esc(e.type)}"><span class="calendar-dot ${esc(e.type)}"></span><div><strong>${esc(calendarTypeLabel(e.type))}｜${esc(e.label)}</strong><br><span class="muted">${esc(e.v?.name||e.history?.vendorName||"発注先不明")} / 数量 ${esc(e.qty)}</span>${e.type==="order"&&hasQuantityOverride(e.key)?`<br><span class="qty-once-note">今回だけ数量修正あり（通常 ${esc(e.p?.defaultQty??0)}）</span>`:""}</div></div>`).join(""):"<div class='empty-state'>表示対象はありません。</div>"}${events.length>cap.length?`<div class="notice">ほか ${events.length-cap.length}件</div>`:""}<button class="btn full" id="calendarGoOrders">発注予定を開く</button>`);
+  $("#calendarGoOrders")?.addEventListener("click",()=>{$("#modal").close();view="today";render();window.scrollTo(0,0)});
+}
+function calendarPage(){
+  const {start,end}=calendarBounds(CALENDAR_MONTH),gridStart=add(start,-start.getDay()),gridEnd=add(end,6-end.getDay()),events=calendarVisibleEvents(),map=new Map();
+  for(const e of events){if(!map.has(e.date))map.set(e.date,[]);map.get(e.date).push(e)}
+  const cells=[];for(let d=new Date(gridStart);d<=gridEnd;d=add(d,1)){const date=iso(d),dayEvents=map.get(date)||[],outside=date.slice(0,7)!==CALENDAR_MONTH,isToday=date===iso(today()),counts={order:0,delivery:0,completed:0,skipped:0};dayEvents.forEach(e=>counts[e.type]++);const chips=[["order","発注"],["delivery","納品"],["completed","済"],["skipped","休"]].filter(([k])=>counts[k]).map(([k,l])=>`<span class="calendar-chip ${k}">${l} ${counts[k]}</span>`).join("");cells.push(`<button class="calendar-cell ${outside?"outside":""} ${isToday?"today":""}" ${dayEvents.length?`data-cal-day="${date}"`:"disabled"}><span class="calendar-day-number">${d.getDate()}</span><span class="calendar-cell-events">${chips}</span></button>`)}
+  const total=t=>calendarEvents().filter(e=>e.type===t).length,[y,m]=CALENDAR_MONTH.split("-");
+  return `<button class="btn secondary small" data-nav="home">← ホーム</button><div class="section page-title-row"><div>取引カレンダー</div><span class="version-chip">v${APP_VERSION}</span></div>
+    <section class="card calendar-toolbar"><div class="calendar-month-nav"><button class="btn secondary small" id="calendarPrev">‹ 前月</button><strong>${esc(y)}年${esc(+m)}月</strong><button class="btn secondary small" id="calendarNext">翌月 ›</button></div><div class="calendar-toolbar-actions"><button class="btn secondary small" id="calendarToday">今月</button><select id="calendarFilter"><option value="all" ${CALENDAR_FILTER==="all"?"selected":""}>すべて</option><option value="order" ${CALENDAR_FILTER==="order"?"selected":""}>発注予定だけ</option><option value="delivery" ${CALENDAR_FILTER==="delivery"?"selected":""}>納品予定だけ</option><option value="completed" ${CALENDAR_FILTER==="completed"?"selected":""}>発注済みだけ</option><option value="skipped" ${CALENDAR_FILTER==="skipped"?"selected":""}>スキップだけ</option></select></div></section>
+    <div class="calendar-summary"><span class="calendar-chip order">発注 ${total("order")}</span><span class="calendar-chip delivery">納品 ${total("delivery")}</span><span class="calendar-chip completed">発注済み ${total("completed")}</span><span class="calendar-chip skipped">スキップ ${total("skipped")}</span></div>
+    <section class="card calendar-card"><div class="calendar-weekdays"><span class="sun">日</span><span>月</span><span>火</span><span>水</span><span>木</span><span>金</span><span class="sat">土</span></div><div class="calendar-grid">${cells.join("")}</div></section>
+    <section class="card notice"><strong>このカレンダーの表示元</strong><br>発注ナビに登録された発注予定・納品予定・発注済み履歴・今回だけスキップを表示しています。Infomartの「取引カレンダー」とリアルタイム同期するものではありません。</section>`;
 }
 
 let HISTORY_MONTH=iso(today()).slice(0,7);
@@ -1344,9 +1448,10 @@ function settings(){
 }
 
 function render(){
+  document.body.dataset.view=view;
   if($("#profileName"))$("#profileName").textContent=activeProfile()?.name||"利用者";
   if($("#adminBtn")){$("#adminBtn").textContent=adminActive()?"🔓":"🔒";$("#adminBtn").classList.toggle("admin-on",adminActive())}
-  let m=$("#main");m.innerHTML=view==="home"?home():view==="guide"?guidePage():view==="catalog"?catalogPage():view==="today"?todayView():view==="history"?historyPage():view==="vendors"?vendors():view==="products"?products():view==="presets"?presets():view==="paper"?paperPage():view==="mobile"?mobileHelperPage():settings();
+  let m=$("#main");m.innerHTML=view==="home"?home():view==="guide"?guidePage():view==="catalog"?catalogPage():view==="today"?todayView():view==="calendar"?calendarPage():view==="history"?historyPage():view==="vendors"?vendors():view==="products"?products():view==="presets"?presets():view==="paper"?paperPage():view==="mobile"?mobileHelperPage():settings();
   if(view==="backup"||view==="admin"){
     const keep=view==="backup"?["backupSection"]:["adminSection","masterSection"];
     $$("#main > section").forEach(el=>{if(!keep.includes(el.id))el.remove()});
@@ -1380,6 +1485,14 @@ function bind(){
   $$("[data-one]").forEach(b=>b.onclick=()=>startOne(b.dataset.one));
   $$("[data-skip]").forEach(b=>b.onclick=()=>skipOnce(b.dataset.skip));
   $$("[data-unskip]").forEach(b=>b.onclick=()=>unskipOnce(b.dataset.unskip));
+  $$("[data-editqty]").forEach(b=>b.onclick=()=>oneTimeQtyDialog(b.dataset.editqty));
+  $$("[data-clearqty]").forEach(b=>b.onclick=()=>{const key=b.dataset.clearqty;if(!confirm("今回だけの数量修正を解除して、通常数量へ戻しますか？"))return;checkpoint("今回だけ数量修正解除前");clearQuantityOverride(key);save("今回だけ数量修正解除")});
+  $("#homeAllMenuBtn")?.addEventListener("click",()=>document.getElementById("homeOtherMenu")?.scrollIntoView({behavior:"smooth",block:"start"}));
+  $("#calendarPrev")?.addEventListener("click",()=>{CALENDAR_MONTH=calendarMonthShift(CALENDAR_MONTH,-1);render()});
+  $("#calendarNext")?.addEventListener("click",()=>{CALENDAR_MONTH=calendarMonthShift(CALENDAR_MONTH,1);render()});
+  $("#calendarToday")?.addEventListener("click",()=>{CALENDAR_MONTH=iso(today()).slice(0,7);render()});
+  $("#calendarFilter")?.addEventListener("change",e=>{CALENDAR_FILTER=e.target.value||"all";render()});
+  $$("[data-cal-day]").forEach(b=>b.onclick=()=>calendarDayDialog(b.dataset.calDay));
   $$("[data-ev]").forEach(b=>b.onclick=async()=>{if(await requireAdmin("発注先マスターを編集"))vendorDialog(b.dataset.ev)});
   $$("[data-schedule-import]").forEach(b=>b.onclick=async()=>{if(await requireAdmin("紙スケジュールを読み込む")){SCHEDULE_VENDOR_ID=b.dataset.scheduleImport;$("#scheduleOcrFiles").click()}});
   $$("[data-schedule-view]").forEach(b=>b.onclick=()=>scheduleViewDialog(b.dataset.scheduleView));
@@ -1577,6 +1690,7 @@ function completePendingRun(){
     const hp=S.products.find(p=>p.code===item.code),hv=V(hp?.vendorId);
     S.history.push({id:uid(),runId:r.id,runName:r.name||"",key:[...entryKeys].find(k=>k.startsWith((hp?.id||"")+"|"))||null,productId:hp?.id||null,vendorId:hv?.id||null,vendorName:hv?.name||"",code:item.code,name:item.name,qty:item.qty,date,status:"completed",inputVerification:verification,recordedAt:new Date().toISOString()});
   }
+  for(const key of entryKeys)clearQuantityOverride(key);
   S.pendingRun=null;save("発注済み記録");
   alert("発注済みとして記録しました。")
 }
@@ -1584,8 +1698,8 @@ function completePendingRun(){
 function encodePayload(p){let bytes=new TextEncoder().encode(JSON.stringify(p)),bin="";bytes.forEach(b=>bin+=String.fromCharCode(b));return PFX+btoa(bin).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"")}
 function guide(){modal(`<h2>数量自動入力ヘルパー</h2><div class="card" style="box-shadow:none"><h3>Windows</h3><p>Chrome / Edge拡張を使用します。現在の商品一覧ページへ商品コード完全一致で数量入力します。別ページは手動で開いて再実行します。</p></div><div class="card" style="box-shadow:none"><h3>スマホ</h3><p>ホームの「スマホ自動入力」からiPhone / iPad用ショートカット、またはAndroid用ブックマークレットを設定できます。</p></div><div class="notice">数量欄のみを変更します。ページ送り・納品日選択・注文確定は自動操作しません。</div>`)}
 async function clip(s){try{await navigator.clipboard.writeText(s);return true}catch{return false}}
-function startOne(k){let e=entries().find(x=>x.key===k);if(!e)return;if(e.safetyIssue){alert("安全停止："+e.safetyIssue);return}startDialog({name:"1件発注",items:[{code:e.p.code,qty:e.p.defaultQty,name:e.p.name}]},[e])}
-function runToday(){let c=classify(),es=[...c.overdue,...c.due];startDialog({name:"今日の発注",items:es.map(e=>({code:e.p.code,qty:e.p.defaultQty,name:e.p.name}))},es)}
+function startOne(k){let e=entries().find(x=>x.key===k);if(!e)return;if(e.safetyIssue){alert("安全停止："+e.safetyIssue);return}startDialog({name:"1件発注",items:[{code:e.p.code,qty:e.qty??orderQtyForKey(e.key,e.p),name:e.p.name}]},[e])}
+function runToday(){let c=classify(),es=[...c.overdue,...c.due];startDialog({name:"今日の発注",items:es.map(e=>({code:e.p.code,qty:e.qty??orderQtyForKey(e.key,e.p),name:e.p.name}))},es)}
 
 function fmtDateISO(s){
   try{return fmtF(parseDate(s))}catch(_){return String(s||"")}
