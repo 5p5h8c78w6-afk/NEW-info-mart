@@ -227,3 +227,12 @@ main{max-width:1120px;padding:22px 18px 86px}
 .history-import-card h3{margin:0 0 6px;color:#103b72}
 .history-imported{border-left:5px solid #3b82f6}
 .history-imported .history-card-head h3:before{content:"Infomart履歴 ";font-size:12px;background:#e8f2ff;color:#1559a7;border-radius:999px;padding:4px 7px;margin-right:7px;vertical-align:2px}
+
+/* v1.5.9 multi-store history */
+.history-store-control{display:flex;align-items:center;gap:7px;font-weight:900}
+.history-store-control select{min-height:44px;padding:8px 12px;border:1px solid var(--line);border-radius:12px;background:#fff;font-weight:800;max-width:320px}
+.history-copy-store{border:2px solid #a9c8ee;background:#f3f8ff;border-radius:14px;padding:12px 14px;margin:8px 0 14px}
+@media(max-width:760px){
+  .history-store-control{display:block;width:100%}
+  .history-store-control select{display:block;width:100%;max-width:none;margin-top:5px}
+}

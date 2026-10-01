@@ -2,7 +2,7 @@
 "use strict";
 
 const SCHEMA_VERSION=3;
-const APP_VERSION="1.5.8";
+const APP_VERSION="1.5.9";
 const ROOT_KEY="infomartOrderNav.root.v3";
 const OLD_ROOT_KEY="infomartOrderNav.multiuser.v2";
 const LEGACY_KEY="infomartOrderNav.web.v1";
@@ -723,7 +723,7 @@ function guidePage(){
   </section>
 
   <section class="guide-section" id="guide-history" data-guide-keywords="前年 前年同月 履歴 コピー 去年 今年">
-    <h2>9. 前年の発注を見る</h2><ol class="guide-numbered"><li>PCのInfomart → <strong>発注予定履歴 → 履歴</strong>を開きます。</li><li>納品日または発注日の範囲を前年に指定し、<strong>伝票の詳細を表示する＝ON、表示数＝100</strong>にします。</li><li>Chrome/Edge拡張 → <strong>前年履歴を全ページ収集</strong>。完了するとJSONが1個ダウンロードされます。</li><li>発注ナビ → <strong>前年・発注履歴を見る → Infomart履歴JSONを取り込む</strong>。</li><li>「前年同月を表示」で確認し、必要なら「今年用プリセットにコピー」。</li></ol>
+    <h2>9. 前年の発注を見る</h2><ol class="guide-numbered"><li>Infomartで履歴を取りたい<strong>店舗へ切り替え</strong>、発注予定履歴 → 履歴を開きます。</li><li>納品日または発注日の範囲を前年に指定し、<strong>伝票の詳細を表示する＝ON、表示数＝100</strong>にします。</li><li>Chrome/Edge拡張 → <strong>前年履歴を全ページ収集</strong>。JSONには店舗名も保存されます。</li><li>複数店舗がある場合は、Infomartで店舗を切り替えて店舗ごとに同じ操作を行います。</li><li>発注ナビ → <strong>前年・発注履歴を見る → Infomart履歴JSONを取り込む</strong>。</li><li>上部の<strong>全店舗 / 店舗名</strong>で切り替え、「前年同月を表示」で店舗別に比較できます。</li><li>「今年用プリセットにコピー」ではコピー元店舗名が表示されます。</li></ol>
     <div class="notice">Infomartから取り込んだ履歴は納品月で表示します。前年の日付・納品条件を今年の発注条件としてはコピーしません。</div>
   </section>
 
@@ -873,6 +873,7 @@ function todayView(){
 }
 
 let HISTORY_MONTH=iso(today()).slice(0,7);
+let HISTORY_STORE="all";
 
 function ymShift(ym,years){
   const [y,m]=String(ym||iso(today()).slice(0,7)).split("-").map(Number);
@@ -882,6 +883,27 @@ function currentYM(){return iso(today()).slice(0,7)}
 function previousYearSameMonth(){return ymShift(currentYM(),-1)}
 
 function histNorm(s){return String(s??"").normalize("NFKC").replace(/[　\s]+/g," ").trim()}
+function historyStoreName(v){const s=histNorm(v);return s||"店舗不明"}
+function historyStoreShort(v){
+  let s=historyStoreName(v);
+  if(s==="店舗不明")return s;
+  s=s.replace(/（[^）]*）|\([^)]*\)/g,"").trim();
+  s=s.replace(/^麻布あさひ[　\s]*/,"").trim();
+  return s||historyStoreName(v);
+}
+function extractStoreNameFromDiagnostic(pkg){
+  const lines=String(pkg?.pageText||"").split(/\r?\n/).map(histNorm).filter(Boolean);
+  const stop=lines.findIndex(x=>x==="マイページ");
+  const head=stop>=0?lines.slice(0,stop):lines.slice(0,8);
+  const ignore=/^(BtoB|発注予定履歴|発注リスト|Info Mart|予定一覧|履歴)$/i;
+  const found=head.find(x=>!ignore.test(x)&&!/^20\d{2}[\/-]\d/.test(x));
+  return historyStoreName(pkg?.storeName||found);
+}
+function historyStoreValues(){
+  const vals=[...new Set((S.history||[]).filter(h=>h.status==="completed").map(h=>historyStoreName(h.storeName)))];
+  return vals.sort((a,b)=>historyStoreShort(a).localeCompare(historyStoreShort(b),"ja"));
+}
+
 function histDate(s){const m=String(s||"").match(/(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);return m?`${m[1]}-${String(+m[2]).padStart(2,"0")}-${String(+m[3]).padStart(2,"0")}`:""}
 function histDateTime(s){const d=histDate(s),m=String(s||"").match(/[【\[]?(\d{1,2}):(\d{2})[】\]]?/);return d&&m?`${d}T${String(+m[1]).padStart(2,"0")}:${m[2]}`:d}
 function histNumber(s){const n=Number(String(s??"").replace(/[,，\s]/g,""));return Number.isFinite(n)?n:null}
@@ -899,6 +921,7 @@ function parseInfomartHistoryDiagnostic(pkg){
   if(pkg?.captureVersion!=="infomart-history-dom-v1"||pkg?.page?.origin!=="https://www2.infomart.co.jp")throw Error("Infomart履歴DOMのJSONではありません");
   const table=(pkg.tables||[]).find(t=>t?.meta?.id==="phHist"||t?.selectorHint==="table#phHist");
   if(!table?.rows?.length)throw Error("履歴テーブル（phHist）が見つかりません");
+  const storeName=extractStoreNameFromDiagnostic(pkg);
   const orders=[];let pendingStatus="",cur=null;
   for(const row of table.rows){
     const statusCell=(row.cells||[]).find(c=>c?.meta?.id==="statusHistContainer");
@@ -906,7 +929,7 @@ function parseInfomartHistoryDiagnostic(pkg){
     const id=row?.meta?.id||"";
     if(id==="trRptRow2Hist"){
       const c=row.cells||[];
-      cur={status:pendingStatus,planNo:histNorm(c[0]?.text),slipNo:histNorm(c[1]?.text),vendor:histNorm(c[2]?.text),staff:histNorm(c[3]?.text),items:[]};
+      cur={status:pendingStatus,storeName,planNo:histNorm(c[0]?.text),slipNo:histNorm(c[1]?.text),vendor:histNorm(c[2]?.text),staff:histNorm(c[3]?.text),items:[]};
       orders.push(cur);
     }else if(id==="trRptRow3Hist"&&cur){
       const c=row.cells||[];
@@ -916,36 +939,44 @@ function parseInfomartHistoryDiagnostic(pkg){
       cur.items.push({name:histNorm(c[0]?.text),specification:histNorm(c[1]?.text),unitPrice:histNorm(c[2]?.text),qty:histNorm(c[3]?.text),unit:histNorm(c[4]?.text)});
     }
   }
-  return {schemaVersion:"infomart-history-export-v1",source:"diagnostic-json",exportedAt:pkg.capturedAt||new Date().toISOString(),orders};
+  return {schemaVersion:"infomart-history-export-v1",source:"diagnostic-json",exportedAt:pkg.capturedAt||new Date().toISOString(),storeName,orders};
 }
 function normalizeInfomartHistoryPackage(pkg){
-  if(pkg?.schemaVersion==="infomart-history-export-v1"&&Array.isArray(pkg.orders))return pkg;
-  if(pkg?.captureVersion==="infomart-history-dom-v1")return parseInfomartHistoryDiagnostic(pkg);
-  throw Error("対応していない履歴JSONです");
+  let out;
+  if(pkg?.schemaVersion==="infomart-history-export-v1"&&Array.isArray(pkg.orders))out=clone(pkg);
+  else if(pkg?.captureVersion==="infomart-history-dom-v1")out=parseInfomartHistoryDiagnostic(pkg);
+  else throw Error("対応していない履歴JSONです");
+  const storeName=historyStoreName(out.storeName||out.filters?.storeName||out.orders?.find(o=>o?.storeName)?.storeName);
+  out.storeName=storeName;
+  out.orders=(out.orders||[]).map(o=>({...o,storeName:historyStoreName(o?.storeName||storeName)}));
+  return out;
 }
 function importInfomartHistoryPackage(pkg,label){
   const pack=normalizeInfomartHistoryPackage(pkg),orders=pack.orders||[];
   if(!orders.length)throw Error("取り込める履歴がありません");
-  const existing=new Set((S.history||[]).map(h=>h.importKey).filter(Boolean));
+  const existing=new Set((S.history||[]).flatMap(h=>[h.importKey,h.importLegacyKey].filter(Boolean)));
   let added=0,duplicates=0,matched=0,unmatched=0,ordersAdded=0;
+  const stores=new Set();
   checkpoint("Infomart前年履歴取り込み前");
   for(const order of orders){
     const slip=histNorm(order.slipNo),plan=histNorm(order.planNo),vendor=histNorm(order.vendor);
+    const storeName=historyStoreName(order.storeName||pack.storeName);stores.add(storeName);
     const deliveryDate=histDate(order.deliveryDate),orderDate=histDate(order.orderDate),date=deliveryDate||orderDate;
     if(!date||!Array.isArray(order.items)||!order.items.length)continue;
     let thisAdded=0;
     order.items.forEach((it,idx)=>{
       const qty=histNumber(it.qty);
       if(qty===null||qty<0||!histNorm(it.name))return;
-      const identity=`${slip||plan||date}|${idx}|${histNorm(it.name)}|${histNorm(it.specification)}|${qty}|${histNorm(it.unit)}`;
-      const importKey=`infomart-history:${identity}`;
-      if(existing.has(importKey)){duplicates++;return}
+      const legacyIdentity=`${slip||plan||date}|${idx}|${histNorm(it.name)}|${histNorm(it.specification)}|${qty}|${histNorm(it.unit)}`;
+      const importLegacyKey=`infomart-history:${legacyIdentity}`;
+      const importKey=`infomart-history:${storeName}|${legacyIdentity}`;
+      if(existing.has(importKey)||existing.has(importLegacyKey)){duplicates++;return}
       const temp={name:histNorm(it.name),specification:histNorm(it.specification),code:"",productId:null};
       const p=resolveHistoryProduct(temp);
       if(p)matched++;else unmatched++;
       S.history.push({
-        id:uid(),runId:`infomart:${slip||plan||date}`,runName:`Infomart ${vendor||"発注履歴"}`,
-        source:"infomart-history",importKey,status:"completed",
+        id:uid(),runId:`infomart:${storeName}:${slip||plan||date}`,runName:`Infomart ${historyStoreShort(storeName)} / ${vendor||"発注履歴"}`,
+        source:"infomart-history",importKey,importLegacyKey,status:"completed",storeName,
         productId:p?.id||null,code:p?.code||"",name:histNorm(it.name),specification:histNorm(it.specification),
         qty,unit:histNorm(it.unit),unitPrice:histNumber(it.unitPrice),
         date,deliveryDate,orderDate,closingAt:histDateTime(order.closingAt),
@@ -953,30 +984,35 @@ function importInfomartHistoryPackage(pkg,label){
         deliveryPlace:histNorm(order.deliveryPlace),tradeTotal:histNumber(order.total),infomartStatus:histNorm(order.status),
         recordedAt:new Date().toISOString(),importSource:label||"Infomart履歴"
       });
-      existing.add(importKey);added++;thisAdded++;
+      existing.add(importKey);existing.add(importLegacyKey);added++;thisAdded++;
     });
     if(thisAdded)ordersAdded++;
   }
-  if(!added&&duplicates) return {added,duplicates,matched,unmatched,ordersAdded};
+  if(!added&&duplicates) return {added,duplicates,matched,unmatched,ordersAdded,stores:[...stores]};
   if(!added)throw Error("新しく取り込める履歴がありません");
   save("Infomart前年履歴取り込み");
-  return {added,duplicates,matched,unmatched,ordersAdded};
+  return {added,duplicates,matched,unmatched,ordersAdded,stores:[...stores]};
 }
 async function importInfomartHistoryFiles(files){
   const list=[...files||[]];if(!list.length)return;
-  let total={added:0,duplicates:0,matched:0,unmatched:0,ordersAdded:0},errors=[];
+  let total={added:0,duplicates:0,matched:0,unmatched:0,ordersAdded:0},errors=[],stores=new Set();
   for(const f of list){
     try{
       const pkg=JSON.parse(await f.text()),r=importInfomartHistoryPackage(pkg,f.name);
       for(const k of Object.keys(total))total[k]+=r[k]||0;
+      (r.stores||[]).forEach(s=>stores.add(historyStoreName(s)));
     }catch(e){errors.push(`${f.name}: ${e.message}`)}
   }
-  HISTORY_MONTH=previousYearSameMonth();render();
-  alert(`Infomart履歴を取り込みました。\n伝票 ${total.ordersAdded}件 / 商品 ${total.added}件\n重複スキップ ${total.duplicates}件\n現在の商品マスターと一意一致 ${total.matched}件\n未一致 ${total.unmatched}件${errors.length?`\n\n読込エラー:\n${errors.join("\n")}`:""}`);
+  HISTORY_MONTH=previousYearSameMonth();
+  if(stores.size===1)HISTORY_STORE=[...stores][0];
+  render();
+  const storeText=[...stores].map(historyStoreShort).join(" / ")||"店舗不明";
+  alert(`Infomart履歴を取り込みました。\n店舗 ${storeText}\n伝票 ${total.ordersAdded}件 / 商品 ${total.added}件\n重複スキップ ${total.duplicates}件\n現在の商品マスターと一意一致 ${total.matched}件\n未一致 ${total.unmatched}件${errors.length?`\n\n読込エラー:\n${errors.join("\n")}`:""}`);
 }
 
 function historyRecordsForMonth(ym){
   return (S.history||[]).filter(h=>h.status==="completed"&&String(h.date||"").slice(0,7)===ym)
+    .filter(h=>HISTORY_STORE==="all"||historyStoreName(h.storeName)===HISTORY_STORE)
     .slice().sort((a,b)=>String(b.recordedAt||b.date||"").localeCompare(String(a.recordedAt||a.date||"")));
 }
 function historyGroupsForMonth(ym){
@@ -984,7 +1020,7 @@ function historyGroupsForMonth(ym){
   for(const h of records){
     const key=h.runId||`legacy:${h.date||"unknown"}`;
     if(!map.has(key)){
-      const g={key,runId:h.runId||null,date:h.date||"",runName:h.runName||"",recordedAt:h.recordedAt||"",items:[]};
+      const g={key,runId:h.runId||null,date:h.date||"",runName:h.runName||"",storeName:historyStoreName(h.storeName),recordedAt:h.recordedAt||"",items:[]};
       map.set(key,g);groups.push(g);
     }
     const g=map.get(key);
@@ -1001,10 +1037,13 @@ function historyVendorLabel(h){
   return V(p?.vendorId)?.name||"発注先不明";
 }
 function historyPage(){
+  const stores=historyStoreValues();
+  if(HISTORY_STORE!=="all"&&!stores.includes(HISTORY_STORE))HISTORY_STORE="all";
   const groups=historyGroupsForMonth(HISTORY_MONTH);
   const [yy,mm]=HISTORY_MONTH.split("-");
   const prev=previousYearSameMonth();
   const isPrev=HISTORY_MONTH===prev;
+  const storeOptions=`<option value="all" ${HISTORY_STORE==="all"?"selected":""}>全店舗</option>`+stores.map(s=>`<option value="${esc(s)}" ${HISTORY_STORE===s?"selected":""}>${esc(historyStoreShort(s))}</option>`).join("");
 
   return `<button class="btn secondary small" data-nav="home">← ホーム</button>
     <div class="section">発注履歴</div>
@@ -1014,6 +1053,9 @@ function historyPage(){
         <p class="muted">発注ナビで「発注済み」にした履歴を表示します。</p><div class="notice history-scope-note"><strong>前年について：</strong>この画面に出るのは発注ナビに記録された履歴です。発注ナビ導入前のInfomart注文履歴は自動では入ってきません。</div>
       </div>
       <div class="history-controls">
+        <label class="history-store-control">店舗
+          <select id="historyStoreFilter">${storeOptions}</select>
+        </label>
         <input id="historyMonth" type="month" value="${esc(HISTORY_MONTH)}">
         <button class="btn secondary" id="historyThisMonth">今月</button>
         <button class="btn ${isPrev?"green":"secondary"}" id="historyPrevYear">前年同月を表示</button>
@@ -1025,7 +1067,7 @@ function historyPage(){
       発注日・納品日は自動変更せず、今年の発注時に現在の発注先ルールで再チェックします。
     </section>
     <section class="card history-import-card">
-      <div><h3>Infomartの前年履歴を取り込む</h3><p class="muted">PCのInfomart「発注予定履歴 → 履歴」で収集したJSONを選びます。納品日・発注日・締め日時・取引先・商品・規格・数量・単位・金額を保存します。</p></div>
+      <div><h3>Infomartの前年履歴を取り込む</h3><p class="muted">PCのInfomart「発注予定履歴 → 履歴」で収集したJSONを選びます。店舗名も正式保存し、店舗別に前年履歴を切り替えられます。</p></div>
       <button class="btn full" id="historyImportBtn">Infomart履歴JSONを取り込む</button>
       <input id="historyImportFiles" type="file" accept=".json,application/json" multiple hidden>
       <div class="notice" style="margin-top:10px">推奨：Chrome/Edge拡張 v1.5.8 の「前年履歴を全ページ収集」を使います。診断JSONもそのまま読み込めます。</div>
@@ -1041,7 +1083,7 @@ function historyGroupCard(g){
   const rows=g.items.map(h=>`<div class="history-item"><div><strong>${esc(h.name||h.code)}</strong><br><span class="muted">${h.specification?`${esc(h.specification)} / `:""}${h.code?`${esc(h.code)} / `:""}${esc(historyVendorLabel(h))}</span></div><div class="history-qty">× ${esc(h.qty)}${h.unit?` ${esc(h.unit)}`:""}</div></div>`).join("");
   return `<section class="card history-card ${imported?"history-imported":""}">
     <div class="history-card-head">
-      <div><h3>${esc(title)}</h3><p class="muted">${imported?`納品 ${esc(meta.deliveryDate||g.date||"不明")} / 発注 ${esc(meta.orderDate||"不明")}${meta.slipNo?` / 伝票No.${esc(meta.slipNo)}`:""}`:`${esc(g.date||"日付不明")} / ${g.items.length}商品 / 合計数量 ${esc(totalQty)}`}</p></div>
+      <div><h3>${esc(title)}</h3><p class="muted"><strong>店舗：${esc(historyStoreShort(g.storeName))}</strong><br>${imported?`納品 ${esc(meta.deliveryDate||g.date||"不明")} / 発注 ${esc(meta.orderDate||"不明")}${meta.slipNo?` / 伝票No.${esc(meta.slipNo)}`:""}`:`${esc(g.date||"日付不明")} / ${g.items.length}商品 / 合計数量 ${esc(totalQty)}`}</p></div>
       <span class="master-badge">${esc(vendors.length)}発注先</span>
     </div>
     ${rows}
@@ -1063,9 +1105,12 @@ function historyCopyDialog(groupKey){
   }
   const currentYear=today().getFullYear();
   const monthDay=String(g.date||"").slice(5).replace("-","/");
-  const defaultName=`前年コピー ${currentYear}/${monthDay||"発注"}`;
+  const sourceStore=historyStoreName(g.storeName||g.items?.[0]?.storeName);
+  const sourceStoreShort=historyStoreShort(sourceStore);
+  const defaultName=`前年コピー ${currentYear}/${monthDay||"発注"} ${sourceStoreShort}`;
 
   modal(`<h2>前年から今年へコピー</h2>
+    <div class="history-copy-store"><strong>コピー元店舗：${esc(sourceStoreShort)}</strong><br><span class="muted">${sourceStore!=="店舗不明"?esc(sourceStore):"店舗情報なし"}</span></div>
     <p class="muted">${esc(g.date||"日付不明")} の発注内容から、今年用のプリセットを作ります。</p>
     <div class="field"><label>新しいプリセット名</label><input id="historyCopyName" value="${esc(defaultName)}"></div>
     <div class="section">コピーする商品</div>
@@ -1084,12 +1129,12 @@ function historyCopyDialog(groupKey){
     while((S.presets||[]).some(p=>p.name===unique)){unique=`${name} (${seq++})`}
     S.presets.push({
       id:uid(),name:unique,items,
-      copiedFromHistory:{date:g.date||null,runId:g.runId||null,copiedAt:new Date().toISOString()}
+      copiedFromHistory:{date:g.date||null,runId:g.runId||null,storeName:sourceStore,copiedAt:new Date().toISOString()}
     });
     save("前年履歴から今年用プリセット作成");
     $("#modal").close();
     view="presets";render();
-    alert(`「${unique}」を作成しました。発注前に内容を確認してください。`);
+    alert(`「${unique}」を作成しました。\nコピー元店舗：${sourceStoreShort}\n発注前に内容を確認してください。`);
   };
 }
 
@@ -1226,6 +1271,7 @@ function bind(){
   $("#openPrevYearMonth")?.addEventListener("click",()=>{HISTORY_MONTH=previousYearSameMonth();view="history";render()});
   $("#historyThisMonth")?.addEventListener("click",()=>{HISTORY_MONTH=currentYM();render()});
   $("#historyPrevYear")?.addEventListener("click",()=>{HISTORY_MONTH=previousYearSameMonth();render()});
+  $("#historyStoreFilter")?.addEventListener("change",e=>{HISTORY_STORE=e.target.value||"all";render()});
   $("#historyMonth")?.addEventListener("change",e=>{if(/^\d{4}-\d{2}$/.test(e.target.value)){HISTORY_MONTH=e.target.value;render()}});
   $("#historyImportBtn")?.addEventListener("click",()=>$("#historyImportFiles")?.click());
   $("#historyImportFiles")?.addEventListener("change",e=>importInfomartHistoryFiles(e.target.files));
