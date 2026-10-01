@@ -2,7 +2,7 @@
 "use strict";
 
 const SCHEMA_VERSION=3;
-const APP_VERSION="1.5.7";
+const APP_VERSION="1.5.8";
 const ROOT_KEY="infomartOrderNav.root.v3";
 const OLD_ROOT_KEY="infomartOrderNav.multiuser.v2";
 const LEGACY_KEY="infomartOrderNav.web.v1";
@@ -723,8 +723,8 @@ function guidePage(){
   </section>
 
   <section class="guide-section" id="guide-history" data-guide-keywords="前年 前年同月 履歴 コピー 去年 今年">
-    <h2>9. 前年の発注を見る</h2><ol class="guide-numbered"><li>TOP → <strong>発注履歴を見る</strong>。</li><li>「前年同月を表示」で去年の同じ月を表示。</li><li>「今年用プリセットにコピー」で商品と数量だけをコピー。</li></ol>
-    <div class="notice">前年の発注日・納品日・古い締切条件はコピーしません。今年の条件で再チェックします。</div>
+    <h2>9. 前年の発注を見る</h2><ol class="guide-numbered"><li>PCのInfomart → <strong>発注予定履歴 → 履歴</strong>を開きます。</li><li>納品日または発注日の範囲を前年に指定し、<strong>伝票の詳細を表示する＝ON、表示数＝100</strong>にします。</li><li>Chrome/Edge拡張 → <strong>前年履歴を全ページ収集</strong>。完了するとJSONが1個ダウンロードされます。</li><li>発注ナビ → <strong>前年・発注履歴を見る → Infomart履歴JSONを取り込む</strong>。</li><li>「前年同月を表示」で確認し、必要なら「今年用プリセットにコピー」。</li></ol>
+    <div class="notice">Infomartから取り込んだ履歴は納品月で表示します。前年の日付・納品条件を今年の発注条件としてはコピーしません。</div>
   </section>
 
   <section class="guide-section" id="guide-backup" data-guide-keywords="バックアップ 復元 共通マスター JSON LINE 別スマホ 機種変更 データ">
@@ -880,6 +880,101 @@ function ymShift(ym,years){
 }
 function currentYM(){return iso(today()).slice(0,7)}
 function previousYearSameMonth(){return ymShift(currentYM(),-1)}
+
+function histNorm(s){return String(s??"").normalize("NFKC").replace(/[　\s]+/g," ").trim()}
+function histDate(s){const m=String(s||"").match(/(\d{4})[\/-](\d{1,2})[\/-](\d{1,2})/);return m?`${m[1]}-${String(+m[2]).padStart(2,"0")}-${String(+m[3]).padStart(2,"0")}`:""}
+function histDateTime(s){const d=histDate(s),m=String(s||"").match(/[【\[]?(\d{1,2}):(\d{2})[】\]]?/);return d&&m?`${d}T${String(+m[1]).padStart(2,"0")}:${m[2]}`:d}
+function histNumber(s){const n=Number(String(s??"").replace(/[,，\s]/g,""));return Number.isFinite(n)?n:null}
+function resolveHistoryProduct(h){
+  const products=(S.products||[]).filter(p=>!p.masterOrphan);
+  if(h?.productId){const p=products.find(p=>p.id===h.productId);if(p)return p}
+  if(h?.code){const a=products.filter(p=>p.code===h.code);if(a.length===1)return a[0]}
+  const name=histNorm(h?.name),spec=histNorm(h?.specification);
+  if(!name)return null;
+  let a=products.filter(p=>histNorm(p.name)===name);
+  if(spec)a=a.filter(p=>histNorm(productSpecText(p))===spec);
+  return a.length===1?a[0]:null;
+}
+function parseInfomartHistoryDiagnostic(pkg){
+  if(pkg?.captureVersion!=="infomart-history-dom-v1"||pkg?.page?.origin!=="https://www2.infomart.co.jp")throw Error("Infomart履歴DOMのJSONではありません");
+  const table=(pkg.tables||[]).find(t=>t?.meta?.id==="phHist"||t?.selectorHint==="table#phHist");
+  if(!table?.rows?.length)throw Error("履歴テーブル（phHist）が見つかりません");
+  const orders=[];let pendingStatus="",cur=null;
+  for(const row of table.rows){
+    const statusCell=(row.cells||[]).find(c=>c?.meta?.id==="statusHistContainer");
+    if(statusCell)pendingStatus=histNorm(statusCell.text);
+    const id=row?.meta?.id||"";
+    if(id==="trRptRow2Hist"){
+      const c=row.cells||[];
+      cur={status:pendingStatus,planNo:histNorm(c[0]?.text),slipNo:histNorm(c[1]?.text),vendor:histNorm(c[2]?.text),staff:histNorm(c[3]?.text),items:[]};
+      orders.push(cur);
+    }else if(id==="trRptRow3Hist"&&cur){
+      const c=row.cells||[];
+      Object.assign(cur,{deliveryDate:histNorm(c[0]?.text),orderDate:histNorm(c[1]?.text),closingAt:histNorm(c[2]?.text),deliveryPlace:histNorm(c[3]?.text),total:histNorm(c[4]?.text)});
+    }else if(id==="trDetailsRowHist"&&cur){
+      const c=row.cells||[];
+      cur.items.push({name:histNorm(c[0]?.text),specification:histNorm(c[1]?.text),unitPrice:histNorm(c[2]?.text),qty:histNorm(c[3]?.text),unit:histNorm(c[4]?.text)});
+    }
+  }
+  return {schemaVersion:"infomart-history-export-v1",source:"diagnostic-json",exportedAt:pkg.capturedAt||new Date().toISOString(),orders};
+}
+function normalizeInfomartHistoryPackage(pkg){
+  if(pkg?.schemaVersion==="infomart-history-export-v1"&&Array.isArray(pkg.orders))return pkg;
+  if(pkg?.captureVersion==="infomart-history-dom-v1")return parseInfomartHistoryDiagnostic(pkg);
+  throw Error("対応していない履歴JSONです");
+}
+function importInfomartHistoryPackage(pkg,label){
+  const pack=normalizeInfomartHistoryPackage(pkg),orders=pack.orders||[];
+  if(!orders.length)throw Error("取り込める履歴がありません");
+  const existing=new Set((S.history||[]).map(h=>h.importKey).filter(Boolean));
+  let added=0,duplicates=0,matched=0,unmatched=0,ordersAdded=0;
+  checkpoint("Infomart前年履歴取り込み前");
+  for(const order of orders){
+    const slip=histNorm(order.slipNo),plan=histNorm(order.planNo),vendor=histNorm(order.vendor);
+    const deliveryDate=histDate(order.deliveryDate),orderDate=histDate(order.orderDate),date=deliveryDate||orderDate;
+    if(!date||!Array.isArray(order.items)||!order.items.length)continue;
+    let thisAdded=0;
+    order.items.forEach((it,idx)=>{
+      const qty=histNumber(it.qty);
+      if(qty===null||qty<0||!histNorm(it.name))return;
+      const identity=`${slip||plan||date}|${idx}|${histNorm(it.name)}|${histNorm(it.specification)}|${qty}|${histNorm(it.unit)}`;
+      const importKey=`infomart-history:${identity}`;
+      if(existing.has(importKey)){duplicates++;return}
+      const temp={name:histNorm(it.name),specification:histNorm(it.specification),code:"",productId:null};
+      const p=resolveHistoryProduct(temp);
+      if(p)matched++;else unmatched++;
+      S.history.push({
+        id:uid(),runId:`infomart:${slip||plan||date}`,runName:`Infomart ${vendor||"発注履歴"}`,
+        source:"infomart-history",importKey,status:"completed",
+        productId:p?.id||null,code:p?.code||"",name:histNorm(it.name),specification:histNorm(it.specification),
+        qty,unit:histNorm(it.unit),unitPrice:histNumber(it.unitPrice),
+        date,deliveryDate,orderDate,closingAt:histDateTime(order.closingAt),
+        planNo:plan,slipNo:slip,vendorName:vendor,staff:histNorm(order.staff),
+        deliveryPlace:histNorm(order.deliveryPlace),tradeTotal:histNumber(order.total),infomartStatus:histNorm(order.status),
+        recordedAt:new Date().toISOString(),importSource:label||"Infomart履歴"
+      });
+      existing.add(importKey);added++;thisAdded++;
+    });
+    if(thisAdded)ordersAdded++;
+  }
+  if(!added&&duplicates) return {added,duplicates,matched,unmatched,ordersAdded};
+  if(!added)throw Error("新しく取り込める履歴がありません");
+  save("Infomart前年履歴取り込み");
+  return {added,duplicates,matched,unmatched,ordersAdded};
+}
+async function importInfomartHistoryFiles(files){
+  const list=[...files||[]];if(!list.length)return;
+  let total={added:0,duplicates:0,matched:0,unmatched:0,ordersAdded:0},errors=[];
+  for(const f of list){
+    try{
+      const pkg=JSON.parse(await f.text()),r=importInfomartHistoryPackage(pkg,f.name);
+      for(const k of Object.keys(total))total[k]+=r[k]||0;
+    }catch(e){errors.push(`${f.name}: ${e.message}`)}
+  }
+  HISTORY_MONTH=previousYearSameMonth();render();
+  alert(`Infomart履歴を取り込みました。\n伝票 ${total.ordersAdded}件 / 商品 ${total.added}件\n重複スキップ ${total.duplicates}件\n現在の商品マスターと一意一致 ${total.matched}件\n未一致 ${total.unmatched}件${errors.length?`\n\n読込エラー:\n${errors.join("\n")}`:""}`);
+}
+
 function historyRecordsForMonth(ym){
   return (S.history||[]).filter(h=>h.status==="completed"&&String(h.date||"").slice(0,7)===ym)
     .slice().sort((a,b)=>String(b.recordedAt||b.date||"").localeCompare(String(a.recordedAt||a.date||"")));
@@ -929,6 +1024,12 @@ function historyPage(){
       前年の発注カードにある「今年用プリセットにコピー」で、当時の商品と数量を現在のプリセット候補として複製できます。
       発注日・納品日は自動変更せず、今年の発注時に現在の発注先ルールで再チェックします。
     </section>
+    <section class="card history-import-card">
+      <div><h3>Infomartの前年履歴を取り込む</h3><p class="muted">PCのInfomart「発注予定履歴 → 履歴」で収集したJSONを選びます。納品日・発注日・締め日時・取引先・商品・規格・数量・単位・金額を保存します。</p></div>
+      <button class="btn full" id="historyImportBtn">Infomart履歴JSONを取り込む</button>
+      <input id="historyImportFiles" type="file" accept=".json,application/json" multiple hidden>
+      <div class="notice" style="margin-top:10px">推奨：Chrome/Edge拡張 v1.5.8 の「前年履歴を全ページ収集」を使います。診断JSONもそのまま読み込めます。</div>
+    </section>
     ${groups.length?groups.map(historyGroupCard).join(""):`<section class="card"><h3>履歴はありません</h3><p class="muted">${esc(yy)}年${esc(+mm)}月に発注ナビへ保存された発注履歴はありません。</p></section>`}`;
 }
 function historyGroupCard(g){
@@ -936,10 +1037,11 @@ function historyGroupCard(g){
   const totalQty=g.items.reduce((n,x)=>n+(+x.qty||0),0);
   const canCopy=String(g.date||"").slice(0,4)!==String(today().getFullYear());
   const title=g.runName||`発注 ${String(g.date||"").replaceAll("-","/")}`;
-  const rows=g.items.map(h=>`<div class="history-item"><div><strong>${esc(h.name||h.code)}</strong><br><span class="muted">${esc(h.code)} / ${esc(historyVendorLabel(h))}</span></div><div class="history-qty">× ${esc(h.qty)}</div></div>`).join("");
-  return `<section class="card history-card">
+  const meta=g.items[0]||{},imported=g.items.some(h=>h.source==="infomart-history");
+  const rows=g.items.map(h=>`<div class="history-item"><div><strong>${esc(h.name||h.code)}</strong><br><span class="muted">${h.specification?`${esc(h.specification)} / `:""}${h.code?`${esc(h.code)} / `:""}${esc(historyVendorLabel(h))}</span></div><div class="history-qty">× ${esc(h.qty)}${h.unit?` ${esc(h.unit)}`:""}</div></div>`).join("");
+  return `<section class="card history-card ${imported?"history-imported":""}">
     <div class="history-card-head">
-      <div><h3>${esc(title)}</h3><p class="muted">${esc(g.date||"日付不明")} / ${g.items.length}商品 / 合計数量 ${esc(totalQty)}</p></div>
+      <div><h3>${esc(title)}</h3><p class="muted">${imported?`納品 ${esc(meta.deliveryDate||g.date||"不明")} / 発注 ${esc(meta.orderDate||"不明")}${meta.slipNo?` / 伝票No.${esc(meta.slipNo)}`:""}`:`${esc(g.date||"日付不明")} / ${g.items.length}商品 / 合計数量 ${esc(totalQty)}`}</p></div>
       <span class="master-badge">${esc(vendors.length)}発注先</span>
     </div>
     ${rows}
@@ -955,7 +1057,7 @@ function historyCopyDialog(groupKey){
 
   const available=[],missing=[];
   for(const h of g.items){
-    const p=(S.products||[]).find(p=>p.code===h.code&&!p.masterOrphan);
+    const p=resolveHistoryProduct(h);
     if(p)available.push({history:h,p,qty:Math.max(0,+h.qty||0)});
     else missing.push(h);
   }
@@ -968,7 +1070,7 @@ function historyCopyDialog(groupKey){
     <div class="field"><label>新しいプリセット名</label><input id="historyCopyName" value="${esc(defaultName)}"></div>
     <div class="section">コピーする商品</div>
     ${available.map(x=>`<div class="task"><div><strong>${esc(x.p.name||x.p.code)}</strong><br><span class="muted">${esc(x.p.code)} / ${esc(V(x.p.vendorId)?.name||"発注先未設定")}</span></div><div><strong>× ${esc(x.qty)}</strong></div></div>`).join("")||'<div class="error">現在の商品マスターに一致する商品がありません。</div>'}
-    ${missing.length?`<div class="notice" style="margin-top:8px"><strong>コピー対象外 ${missing.length}件</strong><br>${missing.map(x=>esc(`${x.name||x.code} (${x.code})`)).join("<br>")}<br>現在の商品マスターに同じ商品コードがないため除外します。</div>`:""}
+    ${missing.length?`<div class="notice" style="margin-top:8px"><strong>コピー対象外 ${missing.length}件</strong><br>${missing.map(x=>esc(`${x.name||x.code} (${x.code})`)).join("<br>")}<br>現在の商品マスターに商品コードまたは「商品名＋規格」で安全に一意一致しないため除外します。</div>`:""}
     <div class="notice" style="margin-top:8px">コピーするのは商品と数量だけです。前年の日付や古い納品条件はコピーしません。今年の発注時にv1.4.7以降のプレフライトで再判定します。</div>
     <button class="btn green full" id="saveHistoryCopy" ${available.length?"":"disabled"}>今年用プリセットを作成</button>`);
 
@@ -1125,6 +1227,8 @@ function bind(){
   $("#historyThisMonth")?.addEventListener("click",()=>{HISTORY_MONTH=currentYM();render()});
   $("#historyPrevYear")?.addEventListener("click",()=>{HISTORY_MONTH=previousYearSameMonth();render()});
   $("#historyMonth")?.addEventListener("change",e=>{if(/^\d{4}-\d{2}$/.test(e.target.value)){HISTORY_MONTH=e.target.value;render()}});
+  $("#historyImportBtn")?.addEventListener("click",()=>$("#historyImportFiles")?.click());
+  $("#historyImportFiles")?.addEventListener("change",e=>importInfomartHistoryFiles(e.target.files));
   $$("[data-copy-history]").forEach(b=>b.onclick=()=>historyCopyDialog(b.dataset.copyHistory));
   $("#todayStatusFilter")?.addEventListener("change",e=>{TODAY_FILTER.status=e.target.value;render()});
   $("#todayVendorFilter")?.addEventListener("change",e=>{TODAY_FILTER.vendor=e.target.value;render()});
