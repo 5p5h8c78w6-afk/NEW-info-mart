@@ -2,7 +2,7 @@
 "use strict";
 
 const SCHEMA_VERSION=3;
-const APP_VERSION="1.5.4";
+const APP_VERSION="1.5.5";
 const ROOT_KEY="infomartOrderNav.root.v3";
 const OLD_ROOT_KEY="infomartOrderNav.multiuser.v2";
 const LEGACY_KEY="infomartOrderNav.web.v1";
@@ -610,6 +610,7 @@ function pendingRunCard(){
 }
 function homeMenu(){
   const items=[
+    ["guide","？","画像つき操作ガイド","迷った時はここ。初回設定からキャンセル・削除、よくあるトラブルまで確認できます。","blue"],
     ["vendors","発","発注先を登録","取引先（発注先）の締切・納品ルールを登録・編集します。","blue"],
     ["products","商","商品・個人設定をする","商品情報と、利用者ごとの数量・発注間隔を設定します。","cyan"],
     ["presets","プ","プリセットを作る","よく使う発注内容をセットにして、すぐ呼び出せます。","lavender"],
@@ -632,11 +633,117 @@ function homeMenu(){
 }
 function home(){
   let c=classify(),cd=countdownInfo();
-  return `<section class="home-welcome"><div><div class="eyebrow-big">Infomart 発注ナビ</div><h2>やさしく、かんたんに発注業務をサポートします</h2><p>${esc(activeProfile().name)}さんの発注状況を確認して、次に必要な作業だけ進めます。</p></div></section>
+  return `<section class="guide-home-cta">
+    <div class="guide-home-icon">？</div>
+    <div class="guide-home-copy"><strong>はじめての方へ｜画像つき使い方</strong><span>発注先登録から、商品登録、プリセット、キャンセル・削除、スマホ自動入力まで細かく説明します。</span></div>
+    <button class="btn" data-nav="guide">操作ガイドを見る</button>
+  </section><section class="home-welcome"><div><div class="eyebrow-big">Infomart 発注ナビ</div><h2>やさしく、かんたんに発注業務をサポートします</h2><p>${esc(activeProfile().name)}さんの発注状況を確認して、次に必要な作業だけ進めます。</p></div></section>
     ${cd?`<div class="countdown ${cd.cls}"><div><strong>今日の締切</strong><br><span class="muted">最も近い締切</span></div><div class="time">${esc(cd.label)}</div></div>`:""}
     ${homeMenu()}${nextAction(c)}${pendingRunCard()}
     ${section("要対応",c.attention,"orange")}${section("発注漏れ注意",c.overdue,"red")}${section("今日の発注",c.due,"green")}
     ${c.upcoming.length?`<div class="section">これからの発注</div><section class="card">${c.upcoming.slice(0,5).map(row).join("")}</section>`:""}`;
+}
+
+
+const GUIDE_SECTIONS=[
+  ["guide-start","最初にすること"],["guide-vendor","発注先を登録"],["guide-product","商品を登録"],
+  ["guide-personal","個人設定"],["guide-preset","プリセット"],["guide-cancel","キャンセル・削除"],
+  ["guide-order","毎日の発注"],["guide-mobile","スマホ自動入力"],["guide-history","前年・履歴"],
+  ["guide-backup","引継ぎ・バックアップ"],["guide-trouble","困ったとき"]
+];
+function guideJumpButtons(){return `<div class="guide-jumps">${GUIDE_SECTIONS.map(([id,label])=>`<button class="guide-jump" data-guide-target="${id}">${esc(label)}</button>`).join("")}</div>`}
+function guideFigure(src,alt){return `<figure class="guide-figure"><img src="./guide/${esc(src)}" alt="${esc(alt)}" loading="lazy"></figure>`}
+function guidePage(){
+  return `<button class="btn secondary small" data-nav="home">← ホーム</button>
+  <div class="section page-title-row"><div>画像つき操作ガイド</div><span class="version-chip">v${APP_VERSION}</span></div>
+  <section class="card guide-lead">
+    <h2>このページだけ見れば、基本操作から取消・削除まで確認できます</h2>
+    <p>「どこを押す？」「消したい時は？」「OCRが変な時は？」など、質問になりやすい所をまとめています。管理者以外の方にもこのページを見てもらってください。</p>
+    <div class="notice"><strong>大事：</strong>発注ナビが自動で行うのは安全確認と数量入力までです。Infomartの<strong>納品日選択・最終発注確定は本人が確認</strong>します。</div>
+    <label class="guide-search-label">キーワードで探す<input id="guideSearch" placeholder="例：キャンセル、OCR、プリセット、スマホ、削除"></label>
+    <div id="guideSearchResult" class="muted"></div>${guideJumpButtons()}
+  </section>
+
+  <section class="guide-section" id="guide-start" data-guide-keywords="最初 初回 LINE URL ホーム画面 Safari Chrome GitHub">
+    <h2>1. 最初にすること</h2>${guideFigure("guide-01-start.svg","発注ナビを開いてホーム画面へ追加する流れ")}
+    <div class="guide-steps"><div><b>① URLを開く</b><p>iPhoneはSafari、AndroidはChrome。LINE内ブラウザのまま使わない方が安定します。</p></div><div><b>② ホーム画面に追加</b><p>毎回GitHubを探す必要はありません。</p></div><div><b>③ 利用者名を確認</b><p>共用端末では右上の利用者名が自分になっているか確認します。</p></div></div>
+  </section>
+
+  <section class="guide-section" id="guide-vendor" data-guide-keywords="発注先 取引先 締切 13:30 3日後 納品曜日 祝日 紙スケジュール">
+    <h2>2. 発注先を登録する</h2>${guideFigure("guide-02-vendor.svg","発注先の締切と最短納品を登録する説明図")}
+    <ol class="guide-numbered"><li>TOPの<strong>「発注先を登録」</strong>を開きます。</li><li>発注先名を入力します。</li><li>Infomart表示が <strong>「13:30締 3日後」</strong>なら、締切＝13:30、最短納品＝3日後として確認します。</li><li>納品できる曜日、発注できない曜日、祝日の発注・納品を確認します。</li><li>実際のInfomart納品日カレンダーまで確認した時だけ<strong>「確認済み」</strong>にします。</li><li>変則日程は<strong>「紙のスケジュールを登録」</strong>から写真OCRまたは手入力で登録します。</li></ol>
+    <div class="error"><strong>やってはいけない：</strong>分からない曜日や祝日条件を推測で「確認済み」にしないでください。</div>
+  </section>
+
+  <section class="guide-section" id="guide-product" data-guide-keywords="商品 登録 OCR DOM スクショ 商品コード 内容量 規格 発注先 信頼度 仮登録">
+    <h2>3. 商品を登録する</h2>${guideFigure("guide-03-product.svg","商品コード・規格・発注先を確認して商品を登録する説明図")}
+    <h3>PCが使える場合：DOM取り込みを優先</h3><p>Infomartの商品一覧を直接読むDOM取り込みが、数量自動入力に使う正式本人確認情報になります。</p>
+    <h3>スマホ等：スクショOCR</h3>
+    <ol class="guide-numbered"><li>商品コードから発注先まで<strong>1行すべて写る</strong>スクショを使います。</li><li><strong>商品コード / 商品名 / 内容量・規格 / 発注先 / 締切 / 最短納品</strong>を元画像と照合します。</li><li>「13:30締 3日後」は締切と最短納品へ分離されます。違っていれば登録前に修正します。</li><li>正しい商品だけチェックし、上の固定バーまたは<strong>「この商品だけ登録」</strong>で登録します。</li></ol>
+    <div class="notice"><strong>チェックしていない商品は完全に無視</strong>されます。閉じても未選択の商品は登録されません。</div>
+    <div class="notice">スクショOCR商品は<strong>仮登録</strong>です。数量自動入力は実DOM完全一致まで安全停止します。</div>
+  </section>
+
+  <section class="guide-section" id="guide-personal" data-guide-keywords="個人設定 数量 毎日 何日ごと ○日ごと 最初の発注日 自動追加 止める">
+    <h2>4. 商品ごとの個人設定</h2>${guideFigure("guide-04-personal.svg","通常数量と発注間隔を設定する説明図")}
+    <ol class="guide-numbered"><li><strong>通常数量</strong>を入力します。</li><li><strong>毎日</strong>は毎日発注予定を作ります。</li><li><strong>○日ごと</strong>は日数欄が空欄です。1〜60の数字を自分で入力します。自動で「1」は入りません。</li><li><strong>最初の発注日</strong>は周期を始める日です。</li><li><strong>発注予定へ自動追加</strong>をOFFにすると、その商品の今後の予定を止められます。商品自体は削除されません。</li></ol>
+    <div class="success"><strong>今後この商品の予定を止めたい</strong> → 共通商品を削除せず、まず「発注予定へ自動追加」をOFF。</div>
+  </section>
+
+  <section class="guide-section" id="guide-preset" data-guide-keywords="プリセット 作る 編集 商品を外す 数量 削除 キャンセル">
+    <h2>5. プリセットを作る・直す</h2>${guideFigure("guide-05-preset.svg","プリセットの作成と商品を外す方法")}
+    <ol class="guide-numbered"><li>TOP → <strong>「プリセットを作る」</strong> → 新しいプリセット。</li><li>使う商品だけチェックし、数量を確認して保存。</li><li><strong>1商品だけ外す</strong>：編集 → その商品のチェックを外す → 保存。</li><li><strong>プリセット全部を消す</strong>：編集画面下部の赤い「削除」。</li></ol>
+    <div class="notice">プリセットを削除しても、共通商品マスターの商品は消えません。</div>
+  </section>
+
+  <section class="guide-section" id="guide-cancel" data-guide-keywords="キャンセル 取消 取り消し 削除 外す 止める 発注していない 発注済み">
+    <h2>6. キャンセル・削除で迷ったとき</h2>
+    <div class="guide-cancel-grid">
+      <div class="guide-cancel-card"><b>今後、その商品の予定を止める</b><span>商品・個人設定 → 個人設定を編集 → 「発注予定へ自動追加」をOFF → 保存</span></div>
+      <div class="guide-cancel-card"><b>プリセットから1商品だけ外す</b><span>プリセット編集 → 対象商品のチェックを外す → 保存</span></div>
+      <div class="guide-cancel-card"><b>プリセット全部を消す</b><span>プリセット編集 → 赤い「削除」</span></div>
+      <div class="guide-cancel-card"><b>数量入力を始めたが、まだ発注していない</b><span>TOPの「Infomart発注の結果を記録」 → 「まだ発注していない」</span></div>
+      <div class="guide-cancel-card danger"><b>共通商品そのものを削除</b><span>管理者操作です。全利用者に影響します。通常の「発注をやめたい」用途では使いません。</span></div>
+      <div class="guide-cancel-card danger"><b>Infomartで最終確定した後の取消</b><span>発注ナビからは取り消せません。Infomart側の注文画面・社内手順で対応します。</span></div>
+    </div>
+    <div class="error"><strong>今回だけ1回スキップ</strong>する専用ボタンは現行版にはありません。1回だけ休みたい時に共通商品を削除しないでください。</div>
+  </section>
+
+  <section class="guide-section" id="guide-order" data-guide-keywords="発注予定 発注開始 数量自動入力 未発注 発注済み 納品日 最終確定">
+    <h2>7. 毎日の発注</h2>${guideFigure("guide-06-order.svg","毎日の発注と未発注に戻す流れ")}
+    <ol class="guide-numbered"><li>TOP → <strong>発注予定を確認する</strong>。</li><li>「今日」または「締切超過」の対象を確認。</li><li>発注先ごとの締切・最短納品・紙スケジュールを確認。</li><li>数量データをコピーしてInfomartを開き、ヘルパーを実行。</li><li>数量入力結果を発注ナビへ戻して照合。</li><li>Infomartで<strong>数量・商品・納品日・金額</strong>を本人が確認して最終確定。</li><li>完了したら「発注済みにする」。途中なら「まだ発注していない」。</li></ol>
+  </section>
+
+  <section class="guide-section" id="guide-mobile" data-guide-keywords="スマホ iPhone ショートカット Android ブックマークレット 自動入力 60分">
+    <h2>8. スマホ数量自動入力</h2>${guideFigure("guide-07-mobile.svg","iPhoneとAndroidで数量自動入力を使う説明図")}
+    <h3>iPhone / iPad</h3><p>TOP → スマホ自動入力 → 「iPhone / iPad用JSをコピー」 → ショートカットAppの「WebページでJavaScriptを実行」へ貼付。初回だけです。</p>
+    <h3>Android</h3><p>TOP → スマホ自動入力 → ブックマークレットをコピー → ChromeのブックマークURLへ貼付。初回だけです。</p>
+    <div class="notice">商品コード・商品名・規格・発注先が一致した数量欄だけを書き換えます。データは60分で失効します。納品日や最終確定は操作しません。</div>
+  </section>
+
+  <section class="guide-section" id="guide-history" data-guide-keywords="前年 前年同月 履歴 コピー 去年 今年">
+    <h2>9. 前年の発注を見る</h2><ol class="guide-numbered"><li>TOP → <strong>発注履歴を見る</strong>。</li><li>「前年同月を表示」で去年の同じ月を表示。</li><li>「今年用プリセットにコピー」で商品と数量だけをコピー。</li></ol>
+    <div class="notice">前年の発注日・納品日・古い締切条件はコピーしません。今年の条件で再チェックします。</div>
+  </section>
+
+  <section class="guide-section" id="guide-backup" data-guide-keywords="バックアップ 復元 共通マスター JSON LINE 別スマホ 機種変更 データ">
+    <h2>10. 他の人へ渡す・バックアップする</h2>
+    <div class="guide-two-col"><div class="card"><h3>他の人へ渡す</h3><p>① 発注ナビURL<br>② 必要なら「現在の共通マスターを書き出す」で作った共通マスターJSON</p></div><div class="card"><h3>全部を保存</h3><p>設定 → バックアップ/復元 → <strong>全利用者バックアップ</strong></p></div></div>
+    <div class="error"><strong>注意：</strong>Infomart_DOM_...json は商品取り込み用。共通マスターJSONや全バックアップJSONとは別物です。</div>
+    <div class="error"><strong>ブラウザの履歴・Webサイトデータを消す前にバックアップ。</strong>登録内容は端末/ブラウザ側に保存されます。</div>
+  </section>
+
+  <section class="guide-section" id="guide-trouble" data-guide-keywords="困った エラー OCR 読めない 更新 古い システムチェック 自動入力 動かない">
+    <h2>11. 困ったとき</h2>${guideFigure("guide-08-trouble.svg","システムチェックとバックアップで困った時に確認する説明図")}
+    <details open><summary>OCRがうまく読めない</summary><p>商品コードから右端の発注先まで全部写す／傾きを減らす／文字が小さすぎない画像を使う／OCR結果は元画像と照合して修正します。</p></details>
+    <details><summary>数量自動入力が動かない</summary><p>Safari/ChromeでInfomartの商品一覧を開いているか、初回設定済みか、数量データ作成から60分以内かを確認。本人確認不一致なら安全停止します。</p></details>
+    <details><summary>発注予定が出ない</summary><p>「発注予定へ自動追加」がONか、最初の発注日と発注間隔、発注先の曜日・祝日・カレンダー確認を確認。</p></details>
+    <details><summary>アップデートしたのに古い画面</summary><p>発注ナビを完全に閉じて開き直します。それでも古い場合はページ再読み込み。画面のv番号も確認。</p></details>
+    <details><summary>「システムチェック」でNG/注意が出た</summary><p>TOP → システムチェックを見る → 表示された修正先へ進み、直してから再診断。推測で設定を埋めないでください。</p></details>
+    <details><summary>何を消していいか分からない</summary><p>まず「キャンセル・削除」を確認。赤い削除ボタンは全利用者へ影響するものがあります。</p></details>
+  </section>
+
+  <section class="card guide-last"><h2>迷ったら「削除」より「止める」を先に</h2><p>発注を止めたいだけなら、共通商品や発注先を削除せず、個人設定の自動追加OFF・プリセットのチェック解除・「まだ発注していない」を使います。</p><button class="btn full" data-nav="home">TOPへ戻る</button></section>`;
 }
 
 function todayEntriesWithStatus(){
@@ -902,7 +1009,7 @@ function settings(){
 function render(){
   if($("#profileName"))$("#profileName").textContent=activeProfile()?.name||"利用者";
   if($("#adminBtn")){$("#adminBtn").textContent=adminActive()?"🔓":"🔒";$("#adminBtn").classList.toggle("admin-on",adminActive())}
-  let m=$("#main");m.innerHTML=view==="home"?home():view==="today"?todayView():view==="history"?historyPage():view==="vendors"?vendors():view==="products"?products():view==="presets"?presets():view==="paper"?paperPage():view==="mobile"?mobileHelperPage():settings();
+  let m=$("#main");m.innerHTML=view==="home"?home():view==="guide"?guidePage():view==="today"?todayView():view==="history"?historyPage():view==="vendors"?vendors():view==="products"?products():view==="presets"?presets():view==="paper"?paperPage():view==="mobile"?mobileHelperPage():settings();
   if(view==="backup"||view==="admin"){
     const keep=view==="backup"?["backupSection"]:["adminSection","masterSection"];
     $$("#main > section").forEach(el=>{if(!keep.includes(el.id))el.remove()});
@@ -913,6 +1020,14 @@ function render(){
 }
 function bind(){
   $$("[data-nav]").forEach(b=>b.onclick=()=>navigate(b.dataset.nav));
+  $("#helpBtn")?.addEventListener("click",()=>navigate("guide"));
+  $$("[data-guide-target]").forEach(b=>b.onclick=()=>document.getElementById(b.dataset.guideTarget)?.scrollIntoView({behavior:"smooth",block:"start"}));
+  $("#guideSearch")?.addEventListener("input",e=>{
+    const q=e.currentTarget.value.trim().toLowerCase(),sections=$$(".guide-section");
+    if(!q){sections.forEach(s=>s.classList.remove("guide-search-hide"));$("#guideSearchResult").textContent="";return}
+    let n=0;sections.forEach(s=>{const hit=(s.textContent+" "+(s.dataset.guideKeywords||"")).toLowerCase().includes(q);s.classList.toggle("guide-search-hide",!hit);if(hit)n++});
+    $("#guideSearchResult").textContent=`${n}件の説明が見つかりました`;
+  });
   $("#returnHealth")?.addEventListener("click",healthDialog);
   $$("[data-paper-open]").forEach(b=>b.onclick=()=>scheduleViewDialog(b.dataset.paperOpen));
   $$("[data-one]").forEach(b=>b.onclick=()=>startOne(b.dataset.one));
