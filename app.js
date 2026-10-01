@@ -2,7 +2,7 @@
 "use strict";
 
 const SCHEMA_VERSION=3;
-const APP_VERSION="1.5.0";
+const APP_VERSION="1.5.2";
 const ROOT_KEY="infomartOrderNav.root.v3";
 const OLD_ROOT_KEY="infomartOrderNav.multiuser.v2";
 const LEGACY_KEY="infomartOrderNav.web.v1";
@@ -1359,6 +1359,82 @@ function parseScheduleOcr(text,fallbackYear,layout='auto',forcedYear=false){
   return {year,entries:cleanScheduleEntries(entries),note,rawText:String(text||''),warnings:[...new Set(warnings)],yearReason:detectScheduleYear(text,0)?'紙面の年から推定（FAX送信年の場合もあります）':'年が読めないため現在年を仮設定'};
 }
 // Recover date positions from Tesseract word boxes, independently of text reading order.
+
+// v1.5.1: rescue dates even when 月/日 are misread. The review screen remains mandatory.
+function scheduleOcrSegments(data){
+  const out=[];
+  const add=(text,box)=>{if(!box)return;const t=normalizeOcrText(text);if(!t||!/[0-9０-９]/.test(t))return;out.push({text:t,box,x:(box.x0+box.x1)/2,y:(box.y0+box.y1)/2,w:Math.max(1,box.x1-box.x0),h:Math.max(1,box.y1-box.y0)})};
+  if(Array.isArray(data?.lines)&&data.lines.length){
+    for(const line of data.lines){
+      const words=line.words||[],box=line.bbox||(words.length?{x0:Math.min(...words.map(w=>w.bbox?.x0??1e9)),y0:Math.min(...words.map(w=>w.bbox?.y0??1e9)),x1:Math.max(...words.map(w=>w.bbox?.x1??-1)),y1:Math.max(...words.map(w=>w.bbox?.y1??-1))}:null);
+      add(line.text||words.map(w=>w.text||'').join(' '),box);
+    }
+  }else if(Array.isArray(data?.words)){
+    const words=data.words.filter(w=>w.bbox&&normalizeOcrText(w.text));
+    const groups=[];
+    for(const w of words.sort((a,b)=>(a.bbox.y0+a.bbox.y1)-(b.bbox.y0+b.bbox.y1)||a.bbox.x0-b.bbox.x0)){
+      const cy=(w.bbox.y0+w.bbox.y1)/2,h=Math.max(1,w.bbox.y1-w.bbox.y0);let g=groups.find(q=>Math.abs(q.cy-cy)<Math.max(12,h*.7));
+      if(!g){g={cy,words:[]};groups.push(g)}g.words.push(w);g.cy=(g.cy*(g.words.length-1)+cy)/g.words.length;
+    }
+    for(const g of groups){g.words.sort((a,b)=>a.bbox.x0-b.bbox.x0);add(g.words.map(w=>w.text||'').join(' '),{x0:Math.min(...g.words.map(w=>w.bbox.x0)),y0:Math.min(...g.words.map(w=>w.bbox.y0)),x1:Math.max(...g.words.map(w=>w.bbox.x1)),y1:Math.max(...g.words.map(w=>w.bbox.y1))})}
+  }
+  return out;
+}
+function fuzzyScheduleDateOptions(text){
+  const s=normalizeOcrText(text),found=new Map();
+  const put=(m,d,score,kind)=>{m=+m;d=+d;if(m<1||m>12||d<1||d>31)return;const k=`${m}-${d}`,old=found.get(k);if(!old||score>old.score)found.set(k,{month:m,day:d,score,kind})};
+  for(const d of extractScheduleDates(s))put(d.month,d.day,130,'strict');
+  const runs=[...s.matchAll(/\d+/g)].map(m=>m[0]);
+  for(let i=0;i<runs.length;i++){
+    const mr=runs[i];if(mr.length>2)continue;const m=+mr;if(m<1||m>12)continue;
+    for(let j=i+1;j<runs.length;j++){
+      const rr=runs[j],skip=j-i-1;
+      for(let trim=0;trim<Math.min(4,rr.length);trim++){const q=trim?rr.slice(0,-trim):rr;if(q.length>=1&&q.length<=2)put(m,+q,92-trim*11-skip*4,'runs')}
+      for(let a=0;a<rr.length;a++)for(const len of [2,1]){const q=rr.slice(a,a+len);if(q)put(m,+q,66-a*3-(len===1?5:0)-skip*4,'window')}
+    }
+  }
+  const digits=runs.join('');
+  for(const ml of [2,1]){
+    if(digits.length<=ml)continue;const m=+digits.slice(0,ml);if(m<1||m>12)continue;const rest=digits.slice(ml);
+    for(let a=0;a<rest.length;a++)for(const len of [2,1]){const q=rest.slice(a,a+len);if(q)put(m,+q,62-a*3-(len===1?6:0),'digits')}
+  }
+  return [...found.values()].sort((a,b)=>b.score-a.score);
+}
+function scheduleBoxIsDark(canvas,box){
+  if(!canvas||!box)return false;try{
+    const ctx=canvas.getContext('2d',{willReadFrequently:true}),pad=Math.max(8,Math.round((box.y1-box.y0)*.55)),x0=Math.max(0,Math.floor(box.x0-pad)),y0=Math.max(0,Math.floor(box.y0-pad)),x1=Math.min(canvas.width,Math.ceil(box.x1+pad)),y1=Math.min(canvas.height,Math.ceil(box.y1+pad));
+    if(x1<=x0||y1<=y0)return false;const im=ctx.getImageData(x0,y0,x1-x0,y1-y0).data;let sum=0,n=0;const step=Math.max(4,Math.floor(Math.sqrt((x1-x0)*(y1-y0)/5000)))*4;
+    for(let i=0;i<im.length;i+=step){sum+=im[i]*.299+im[i+1]*.587+im[i+2]*.114;n++}return n?sum/n<105:false;
+  }catch(_){return false}
+}
+function scheduleAssignRecoveredClasses(entries,rawText){
+  const labels=new Set(extractScheduleClasses(rawText||'')),groups=new Map();
+  for(const e of entries){if(!groups.has(e.orderDate))groups.set(e.orderDate,[]);groups.get(e.orderDate).push(e)}
+  for(const list of groups.values())for(const e of list){const days=Math.round((Date.parse(e.deliveryDate)-Date.parse(e.orderDate))/86400000),cls=`${days}日前`;if([5,8,10].includes(days)&&(list.length>1||labels.has(cls)||e._darkSpecial))e.classKey=cls;delete e._darkSpecial;delete e._confidence}
+  return entries;
+}
+function scheduleFuzzyGeometry(data,year,expectedLead=3){
+  const segs=scheduleOcrSegments(data).map(s=>({...s,options:fuzzyScheduleDateOptions(s.text)})).filter(s=>s.options.length),canvas=data?._sourceCanvas||null,used=new Set(),entries=[];
+  const order=[...segs.keys()].sort((a,b)=>segs[a].y-segs[b].y);
+  for(const ai of order){if(used.has(ai))continue;const a=segs[ai],pairOptions=[];
+    for(let bi=0;bi<segs.length;bi++){
+      if(bi===ai||used.has(bi))continue;const b=segs[bi],gap=b.y-a.y;if(gap<=Math.min(a.h,b.h)*.45||gap>Math.max(a.h,b.h)*3.5+18)continue;if(Math.abs(a.x-b.x)>Math.max(a.w,b.w)*.75+45)continue;
+      const darkA=scheduleBoxIsDark(canvas,a.box),darkB=scheduleBoxIsDark(canvas,b.box),darkSpecial=darkA&&darkB;
+      for(const ao of a.options)for(const bo of b.options){const x=schedulePair(ao,bo,year);if(!x)continue;const days=Math.round((Date.parse(x.deliveryDate)-Date.parse(x.orderDate))/86400000);if(days<1||days>31)continue;
+        let score=ao.score+bo.score-Math.abs(a.x-b.x)*.05-Math.abs(gap-Math.max(a.h,b.h)*1.8)*.03;
+        if(darkSpecial){if([5,8,10].includes(days))score+=85;else score-=75}else if(days===expectedLead)score+=38;else if(days<=14)score-=Math.abs(days-expectedLead)*3;else score-=45;
+        pairOptions.push({score,bi,x,days,darkSpecial});
+      }
+    }
+    if(!pairOptions.length)continue;pairOptions.sort((p,q)=>q.score-p.score);const best=pairOptions[0];
+    if(best.score<105)continue;best.x._confidence=best.score;if(best.darkSpecial)best.x._darkSpecial=true;entries.push(best.x);used.add(ai);used.add(best.bi);
+  }
+  return cleanScheduleEntries(scheduleAssignRecoveredClasses(entries,data?.text||''));
+}
+function scheduleBestEntries(data,year,expectedLead=3){
+  const strict=scheduleGeometry(data,year),fuzzy=scheduleFuzzyGeometry(data,year,expectedLead);
+  return fuzzy.length>=strict.length?fuzzy:strict;
+}
 function scheduleGeometry(data,year){
   const cells=[];
   for(const line of data.lines||[]){
@@ -1433,22 +1509,25 @@ function scheduleImportDialog(vendorId,files){
       worker=await timeout(creating,90000);
       if(closed||mine!==token){await worker.terminate();return}
       for(let i=0;i<files.length;i++){
-        const canvas=await prepareScheduleImage(urls[i],rotation,contrast);
-        const attempts=[];
-        for(const psm of ['3','11']){
-          await worker.setParameters({tessedit_pageseg_mode:psm,preserve_interword_spaces:'1'});
-          const r=await timeout(worker.recognize(canvas),90000);attempts.push(r.data);
-          if(closed||mine!==token)return;
-        }
-        const score=d=>Math.max(parseScheduleOcr(d.text,new Date().getFullYear()).entries.length,scheduleGeometry(d,detectScheduleYear(d.text,new Date().getFullYear())).length);
+        const canvas=await prepareScheduleImage(urls[i],rotation,contrast),attempts=[],expectedLead=Math.max(1,+V(vendorId)?.minLeadDays||3);
+        progress.textContent=`画像 ${i+1}/${files.length}：通常読取`;
+        await worker.setParameters({tessedit_pageseg_mode:'3',preserve_interword_spaces:'1',tessedit_char_whitelist:''});
+        let r=await timeout(worker.recognize(canvas),90000);r.data._sourceCanvas=canvas;r.data._ocrMode='通常';attempts.push(r.data);if(closed||mine!==token)return;
+        progress.textContent=`画像 ${i+1}/${files.length}：位置優先読取`;
+        await worker.setParameters({tessedit_pageseg_mode:'11',preserve_interword_spaces:'1',tessedit_char_whitelist:''});
+        r=await timeout(worker.recognize(canvas),90000);r.data._sourceCanvas=canvas;r.data._ocrMode='位置優先';attempts.push(r.data);if(closed||mine!==token)return;
+        progress.textContent=`画像 ${i+1}/${files.length}：日付専用救済読取`;
+        await worker.setParameters({tessedit_pageseg_mode:'11',preserve_interword_spaces:'1',tessedit_char_whitelist:'0123456789年月日/-'});
+        r=await timeout(worker.recognize(canvas),90000);r.data._sourceCanvas=canvas;r.data._ocrMode='日付専用';attempts.push(r.data);if(closed||mine!==token)return;
+        const score=d=>scheduleBestEntries(d,detectScheduleYear(d.text,new Date().getFullYear()),expectedLead).length*100+(d._ocrMode==='日付専用'?5:0);
         attempts.sort((a,b)=>score(b)-score(a));results.push(attempts[0]);
-        results[results.length-1].allRaw=attempts.map((d,n)=>`【画像${i+1} 読取候補${n+1}】\n${d.text||''}`).join('\n');
+        results[results.length-1].allRaw=attempts.map((d,n)=>`【画像${i+1} ${d._ocrMode||`読取候補${n+1}`}】\n${d.text||''}`).join('\n\n');
       }
     }catch(err){failure=`OCRを完了できませんでした（${err.message||'読取エラー'}）。不足分は手動入力できます。`}
     if(closed||mine!==token)return;
-    const raw=results.map(d=>d.text||'').join('\n\n'),p=parseScheduleOcr(raw,new Date().getFullYear());
-    const candidates=results.flatMap(d=>{const q=parseScheduleOcr(d.text||'',p.year);const g=scheduleGeometry(d,q.year);return g.length>=q.entries.length?g:q.entries});
-    p.entries=cleanScheduleEntries(candidates);p.warnings.push('画像の位置から推定した候補を含みます。抜け・誤認識を全行確認してください。');if(failure)p.warnings.push(failure);
+    const raw=results.map(d=>d.text||'').join('\n\n'),p=parseScheduleOcr(raw,new Date().getFullYear()),expectedLead=Math.max(1,+V(vendorId)?.minLeadDays||3);
+    const candidates=results.flatMap(d=>{const q=parseScheduleOcr(d.text||'',p.year),g=scheduleBestEntries(d,q.year,expectedLead);return g.length>=q.entries.length?g:q.entries});
+    p.entries=cleanScheduleEntries(scheduleAssignRecoveredClasses(candidates,raw));p.warnings.push('v1.5.1では「月・日」が崩れても、数字・位置・上下の同列・通常リード日数・黒背景の5/8/10日前欄を使って救済します。保存前に全行を紙と照合してください。');if(failure)p.warnings.push(failure);
     p.otherRaw=results.map(d=>d.allRaw||d.text||'').join('\n\n');review(p);
   };
 }
@@ -1613,9 +1692,29 @@ if("serviceWorker"in navigator)navigator.serviceWorker.register("./sw.js").catch
 render();
 setTimeout(()=>userSelector(true),250);
 
+async function screenshotFieldOcr(worker,source,cell,field,bounded){
+  const attempts=[],defs=InfomartTableOCR.variants(field);
+  for(let ai=0;ai<defs.length;ai++){
+    const def=defs[ai];
+    await worker.setParameters({
+      tessedit_pageseg_mode:def.psm,
+      preserve_interword_spaces:'1',
+      user_defined_dpi:'300',
+      tessedit_char_whitelist:field==='code'?'0123456789':''
+    });
+    const prepared=InfomartTableOCR.preprocess(source,cell,def);
+    const result=(await bounded(worker.recognize(prepared),90000)).data;
+    attempts.push({text:result.text,confidence:Number(result.confidence)||0,mode:def.label});
+    if(ai>=1){
+      const interim=InfomartTableOCR.consensus(field,attempts);
+      if(interim.confidence>=94&&interim.agreement>=.92&&(field!=='code'||interim.valid))break;
+    }
+  }
+  return InfomartTableOCR.consensus(field,attempts);
+}
 async function screenshotProductImport(files){
   const profileId=ACTIVE_ID;let closed=false,worker=null;
-  modal('<h2>Infomart商品表のスクショ読取</h2><p>表の行と列を検出してから項目別に読み取ります。表全幅・罫線・薄緑の数量欄が写った画像を使用してください。欠けた行や対応しないレイアウトは登録しません。</p><p id="tableProgress" role="status">表を検出中…</p>');
+  modal('<h2>Infomart商品表のスクショ読取</h2><p><strong>精度優先モード</strong>で、商品コード・商品名・規格・取引先を項目別に複数回読みます。商品名は青文字だけを抽出する読取も併用し、「予定」などの色付き表示が商品名へ混ざりにくいようにしています。</p><p>表全幅・罫線・薄緑の数量欄が写った画像を使用してください。欠けた行や対応しないレイアウトは登録しません。</p><p id="tableProgress" role="status">表を検出中…</p>');
   const progress=$('#tableProgress'),dialog=$('#modal');
   const bounded=(promise,ms)=>{let timer;return Promise.race([promise,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('読取タイムアウト')),ms)})]).finally(()=>clearTimeout(timer))};
   const cancel=()=>{closed=true;if(worker)worker.terminate().catch(()=>{})};dialog.addEventListener('close',cancel,{once:true});
@@ -1628,28 +1727,31 @@ async function screenshotProductImport(files){
       if(img.naturalWidth*img.naturalHeight>16000000){reports.push(f.name+'：画像サイズ過大');continue}
       const source=document.createElement('canvas');source.width=img.naturalWidth;source.height=img.naturalHeight;source.getContext('2d').drawImage(img,0,0);
       const rows=InfomartTableOCR.detect(source.getContext('2d').getImageData(0,0,source.width,source.height));
-      reports.push(f.name+'：完全な商品行 '+rows.length+'件（検出できない行は除外）');
+      reports.push(f.name+'：完全な商品行 '+rows.length+'件（精度優先・複数読取）');
       if(!rows.length)continue;
       if(!worker){
         if(!window.Tesseract)await bounded(loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.min.js'),30000);
         if(closed)break;
         const creating=Tesseract.createWorker('jpn+eng',1);creating.then(w=>{if(closed)w.terminate().catch(()=>{})},()=>{});
-        worker=await bounded(creating,60000);
-        if(closed)break;
+        worker=await bounded(creating,60000);if(closed)break;
       }
       for(let ri=0;ri<rows.length&&!closed;ri++){
         if(items.length>=200)throw Error('一度に200行までです。画像を分けてください');
-        const row=rows[ri],raw={},confidence={};let codeCheck;
-        progress.textContent=`画像 ${page+1}/${files.length}・商品行 ${ri+1}/${rows.length} を項目別に読取中`;
+        const row=rows[ri],raw={},confidence={},ocrMeta={};let codeCheck;
         for(let fi=0;fi<4&&!closed;fi++){
-          // No digit whitelist: it could silently remove a URL/price prefix.
-          await worker.setParameters({tessedit_pageseg_mode:fi===0?'7':'6',preserve_interword_spaces:'1'});
-          const result=(await bounded(worker.recognize(InfomartTableOCR.crop(source,row.cells[fi],3)),90000)).data;
-          const key=InfomartTableOCR.fields[fi];raw[key]=result.text;confidence[key]=Number(result.confidence)||0;
-          if(fi===0){await worker.setParameters({tessedit_pageseg_mode:'6'});const again=(await bounded(worker.recognize(InfomartTableOCR.crop(source,row.cells[fi],2)),90000)).data;codeCheck=InfomartTableOCR.codeResult(result,again)}
+          const key=InfomartTableOCR.fields[fi];
+          progress.textContent=`画像 ${page+1}/${files.length}・商品行 ${ri+1}/${rows.length}・${({code:'商品コード',name:'商品名',specification:'規格',vendorDisplay:'取引先'})[key]}を精度強化読取中`;
+          const decision=await screenshotFieldOcr(worker,source,row.cells[fi],key,bounded);
+          raw[key]=decision.text;confidence[key]=decision.confidence;
+          ocrMeta[key]={agreement:decision.agreement,reason:decision.reason||'',attempts:(decision.attempts||[]).map(a=>({text:a.text,confidence:a.confidence,mode:a.mode}))};
+          if(key==='code')codeCheck=decision;
         }
         if(closed)break;
-        items.push({code:codeCheck.text,name:raw.name,specification:raw.specification,vendorDisplay:raw.vendorDisplay,codeValid:codeCheck.valid&&codeCheck.confidence>=85,confidence:{...confidence,code:codeCheck.confidence},raw,codeReason:codeCheck.reason,image:InfomartTableOCR.crop(source,row).toDataURL('image/png'),file:f.name,row:ri+1,geometry:row,manual:{}});
+        items.push({
+          code:codeCheck?.text||'',name:raw.name||'',specification:raw.specification||'',vendorDisplay:raw.vendorDisplay||'',
+          codeValid:!!codeCheck?.valid&&codeCheck.confidence>=90,confidence:{...confidence,code:codeCheck?.confidence||0},raw,
+          codeReason:codeCheck?.reason||'',ocrMeta,image:InfomartTableOCR.crop(source,row).toDataURL('image/png'),file:f.name,row:ri+1,geometry:row,manual:{},ocrEngine:'consensus-v2'
+        });
       }
     }
     if(!closed){dialog.removeEventListener('close',cancel);screenshotReview(items,reports,profileId)}
@@ -1657,46 +1759,71 @@ async function screenshotProductImport(files){
   finally{if(worker)await worker.terminate().catch(()=>{})}
 }
 function screenshotReview(items,reports,profileId){
-  modal(`<h2>元の商品行を確認して仮登録</h2><p>${esc(reports.join(' ／ '))}</p><p>画像が正本です。表示文字はOCR候補です。元画像と照合し、誤りがあれば手修正してください。「確認して登録」にチェックすると、表示中の全項目を確認した扱いになります。コードの読取不一致・低信頼は、元画像で確認してコード欄を入力し直すまで登録できません。</p><p>通常数量0・自動予定停止で仮登録します。PCのDOM取り込みで完全一致するコードの正式表示を後から補完できます。</p><div id="tableRows"></div><p id="tableResult" role="status"></p><button class="btn full" id="saveTableRows">選択した商品を仮登録</button>`);
+  modal(`<h2>元の商品行を確認して仮登録</h2><p>${esc(reports.join(' ／ '))}</p><p>画像が正本です。OCRは複数回の一致度を含む<strong>読取信頼度</strong>へ改善しましたが、登録前には必ず元画像と照合してください。</p><p>スマホでは上の登録バーが画面に残ります。1商品だけなら、その商品の確認チェックを入れて<strong>「選択した1件を登録」</strong>を押せます。各商品カード内にも「この商品だけ登録」を用意しています。</p><div class="ocr-review-toolbar"><strong id="tableSelectedCount">選択中 0件</strong><button class="btn" id="saveTableRowsTop" disabled>選択した商品を登録</button></div><div id="tableRows"></div><p id="tableResult" role="status"></p><button class="btn full" id="saveTableRowsBottom" disabled>選択した商品をまとめて登録</button>`);
   const controls=[];
+  const confWord=n=>n>=93?'高信頼':n>=85?'要確認':'低信頼';
   items.forEach((item,i)=>{
-    const card=document.createElement('section');card.className='card';
-    const title=document.createElement('p');title.textContent=`${item.file} ／ 商品行 ${item.row}`;
+    const card=document.createElement('section');card.className='card ocr-review-card';card.dataset.ocrCard=i;
+    const title=document.createElement('p');title.className='ocr-card-title';title.innerHTML=`<strong>${esc(item.file)} ／ 商品行 ${esc(item.row)}</strong>`;
     const image=document.createElement('img');image.src=item.image;image.alt='元スクショの商品行（'+item.file+'・'+item.row+'行）';image.style.cssText='width:100%;height:auto;min-width:650px';
-    const imageWrap=document.createElement('div');imageWrap.style.overflowX='auto';imageWrap.append(image);
-    const status=document.createElement('p');status.setAttribute('role','status');
+    const imageWrap=document.createElement('div');imageWrap.className='ocr-source-scroll';imageWrap.append(image);
+    const status=document.createElement('p');status.setAttribute('role','status');status.className='ocr-card-status';
     card.append(title,imageWrap,status);
     const inputs={};const labels={code:'商品コード',name:'商品名',specification:'規格・単位',vendorDisplay:'取引先の元表示'};
     for(const key of InfomartTableOCR.fields){
-      const label=document.createElement('label');label.className='field';const text=document.createElement('span');text.textContent=labels[key]+` — ${item.confidence[key]<85?'要確認（低信頼）':'要確認'} / OCR信頼度 ${Math.round(item.confidence[key])}%`;
+      const label=document.createElement('label');label.className='field';const text=document.createElement('span');text.className='ocr-confidence-label';
+      const agree=Math.round((item.ocrMeta?.[key]?.agreement||0)*100),cf=Math.round(item.confidence[key]||0);
+      text.textContent=labels[key]+` — ${confWord(cf)} / 読取信頼度 ${cf}%${agree?` / 複数読取一致 ${agree}%`:''}`;
       const input=document.createElement(key==='code'?'input':'textarea');input.value=item[key];if(key==='code'){input.inputMode='numeric';input.autocomplete='off'}
-      input.addEventListener('input',()=>{item[key]=input.value;item.manual[key]=true;if(key==='code')item.codeValid=/^\d{7,13}$/.test(input.value);controls.forEach(c=>c.check.checked=false);refresh()});
+      input.addEventListener('input',()=>{item[key]=input.value;item.manual[key]=true;if(key==='code')item.codeValid=/^\d{7,13}$/.test(input.value);controls[i].check.checked=false;refresh()});
       inputs[key]=input;label.append(text,input);card.append(label);
     }
-    const actions=document.createElement('div');actions.className='ifm-controls';actions.innerHTML=`<label><input type="checkbox" data-table-check="${i}"> 元画像と全項目を確認して登録</label><label>通常数量 <input type="number" min="0" step="any" value="0" data-table-qty="${i}"></label><label>発注先マスター <select data-table-vendor="${i}">${vendorOptions()}</select></label>`;
-    card.append(actions);$('#tableRows').append(card);controls.push({status,inputs,check:actions.querySelector('[type=checkbox]'),qty:actions.querySelector('[type=number]'),vendor:actions.querySelector('select')});
+    const actions=document.createElement('div');actions.className='ifm-controls ocr-card-actions';actions.innerHTML=`<label class="ocr-confirm"><input type="checkbox" data-table-check="${i}"> 元画像と全項目を確認して登録</label><label>通常数量 <input type="number" min="0" step="any" value="0" data-table-qty="${i}"></label><label>発注先マスター <select data-table-vendor="${i}">${vendorOptions()}</select></label><button class="btn full" type="button" data-table-save-one="${i}" disabled>この商品だけ登録</button>`;
+    card.append(actions);$('#tableRows').append(card);
+    const c={card,status,inputs,check:actions.querySelector('[type=checkbox]'),qty:actions.querySelector('[type=number]'),vendor:actions.querySelector('select'),one:actions.querySelector('[data-table-save-one]'),registered:false};
+    controls.push(c);
+    c.check.addEventListener('change',refresh);c.qty.addEventListener('input',refresh);c.vendor.addEventListener('change',refresh);
   });
-  function refresh(){const states=InfomartTableOCR.classify(items,ROOT.commonMaster.products.map(p=>p.code));states.forEach((state,i)=>{controls[i].status.textContent=state;controls[i].check.disabled=!state.startsWith('要確認');if(controls[i].check.disabled)controls[i].check.checked=false});return states}refresh();
+  function statesNow(){return InfomartTableOCR.classify(items,ROOT.commonMaster.products.map(p=>p.code))}
+  function refresh(){
+    const states=statesNow();let selected=0;
+    states.forEach((state,i)=>{const c=controls[i];
+      if(c.registered){c.status.textContent='登録済み ✓';c.status.className='ocr-card-status success';c.check.checked=false;c.check.disabled=true;c.qty.disabled=true;c.vendor.disabled=true;c.one.disabled=true;c.one.textContent='登録済み ✓';c.card.classList.add('ocr-registered');return}
+      c.status.textContent=state+(items[i].codeReason?` / ${items[i].codeReason}`:'');c.status.className='ocr-card-status';
+      c.check.disabled=!state.startsWith('要確認');if(c.check.disabled)c.check.checked=false;
+      const vendorOK=ROOT.commonMaster.vendors.some(v=>v.id===c.vendor.value),qtyOK=c.qty.value!==''&&Number.isFinite(+c.qty.value)&&+c.qty.value>=0&&+c.qty.value<=Number.MAX_SAFE_INTEGER;
+      c.one.disabled=!(c.check.checked&&state.startsWith('要確認')&&vendorOK&&qtyOK);if(c.check.checked)selected++;
+    });
+    const label=$('#tableSelectedCount');if(label)label.textContent=`選択中 ${selected}件`;
+    const top=$('#saveTableRowsTop'),bottom=$('#saveTableRowsBottom');if(top)top.disabled=!selected;if(bottom)bottom.disabled=!selected;
+    return states;
+  }
+  refresh();
   if(!items.length)$('#tableResult').textContent='対応する完全な商品行がありません。表の左右端と行の上下罫線が写ったスクショを選んでください。PCではDOM取り込みを利用できます。';
-  $('#saveTableRows').onclick=async()=>{
-    const result=$('#tableResult'),button=$('#saveTableRows');button.disabled=true;
+  async function registerIndices(indices,{closeAfter=false}={}){
+    const result=$('#tableResult');
     try{
       if(ACTIVE_ID!==profileId)throw Error('利用者が変わりました。取り込みを開き直してください');
-      const selected=controls.map((c,i)=>c.check.checked?i:-1).filter(i=>i>=0);if(!selected.length)throw Error('元画像を確認し、登録する行にチェックしてください');
-      const states=InfomartTableOCR.classify(items,ROOT.commonMaster.products.map(p=>p.code));
-      for(const i of selected){const c=controls[i];if(!states[i].startsWith('要確認'))throw Error(states[i]);if(!ROOT.commonMaster.vendors.some(v=>v.id===c.vendor.value))throw Error('発注先マスターを選択してください');if(c.qty.value===''||!Number.isFinite(+c.qty.value)||+c.qty.value<0||+c.qty.value>Number.MAX_SAFE_INTEGER)throw Error('通常数量を確認してください')}
-      if(!(await requireAdmin('商品行画像とOCR候補を共通マスターへ仮登録')))return;
+      indices=indices.filter(i=>Number.isInteger(i)&&i>=0&&i<controls.length&&!controls[i].registered);
+      if(!indices.length)throw Error('登録する商品を選んでください');
+      const states=statesNow();
+      for(const i of indices){const c=controls[i];if(!c.check.checked)throw Error(`商品行 ${items[i].row}：元画像確認のチェックを入れてください`);if(!states[i].startsWith('要確認'))throw Error(states[i]);if(!ROOT.commonMaster.vendors.some(v=>v.id===c.vendor.value))throw Error(`商品行 ${items[i].row}：発注先マスターを選択してください`);if(c.qty.value===''||!Number.isFinite(+c.qty.value)||+c.qty.value<0||+c.qty.value>Number.MAX_SAFE_INTEGER)throw Error(`商品行 ${items[i].row}：通常数量を確認してください`)}
+      if(!(await requireAdmin(indices.length===1?'この商品を共通マスターへ仮登録':'選択した商品を共通マスターへ仮登録')))return false;
       if(ACTIVE_ID!==profileId)throw Error('利用者が変わりました');
       const before=clone(ROOT);checkpoint('商品表スクショ仮登録前');
       try{
-        for(const i of selected){const x=items[i],c=controls[i];if(ROOT.commonMaster.products.some(p=>p.code===x.code))throw Error('登録中にコードが重複しました');ROOT.commonMaster.products.push({id:uid(),code:x.code,name:x.name,specification:x.specification,vendorDisplay:x.vendorDisplay,vendorId:c.vendor.value,leadDaysOverride:null,scheduleClass:'standard',allowDecimalQty:false,imageSource:x.image,codeAuthority:'image-reviewed-provisional',screenshotSource:{schemaVersion:1,file:x.file,row:x.row,geometry:x.geometry,raw:x.raw,confidence:x.confidence,manual:x.manual,reviewedAt:new Date().toISOString()},domSyncStatus:'pending'})}
-        ROOT.masterVersion++;syncMasterToProfiles(false);for(const i of selected){const p=S.products.find(p=>p.code===items[i].code);p.defaultQty=+controls[i].qty.value;p.active=false;p.confirmed=false}save('商品表スクショ仮登録');
+        for(const i of indices){const x=items[i],c=controls[i];if(ROOT.commonMaster.products.some(p=>p.code===x.code))throw Error(`${x.code}：登録中にコードが重複しました`);ROOT.commonMaster.products.push({id:uid(),code:x.code,name:x.name,specification:x.specification,vendorDisplay:x.vendorDisplay,vendorId:c.vendor.value,leadDaysOverride:null,scheduleClass:'standard',allowDecimalQty:false,imageSource:x.image,codeAuthority:'image-reviewed-provisional',screenshotSource:{schemaVersion:2,file:x.file,row:x.row,geometry:x.geometry,raw:x.raw,confidence:x.confidence,ocrMeta:x.ocrMeta||{},ocrEngine:x.ocrEngine||'consensus-v2',manual:x.manual,reviewedAt:new Date().toISOString()},domSyncStatus:'pending'})}
+        ROOT.masterVersion++;syncMasterToProfiles(false);for(const i of indices){const p=S.products.find(p=>p.code===items[i].code);p.defaultQty=+controls[i].qty.value;p.active=false;p.confirmed=false}save('商品表スクショ仮登録');
       }catch(e){ROOT=before;S=activeProfile().data;throw Error('保存できませんでした（空き容量を含め確認してください）：'+e.message)}
-      $('#modal').close();alert(`${selected.length}件を画像付きで仮登録しました。DOM未照合・自動予定停止です。`);
-    }catch(e){result.textContent=e.message;refresh()}finally{button.disabled=false}
-  };
+      indices.forEach(i=>controls[i].registered=true);result.textContent=`${indices.length}件を画像付きで仮登録しました。DOM未照合・自動予定停止です。`;result.className='success';refresh();
+      if(closeAfter){$('#modal').close();alert(`${indices.length}件を画像付きで仮登録しました。`)}
+      return true;
+    }catch(e){result.textContent=e.message;result.className='error';refresh();return false}
+  }
+  controls.forEach((c,i)=>{c.one.onclick=()=>registerIndices([i],{closeAfter:false})});
+  const batch=()=>registerIndices(controls.map((c,i)=>c.check.checked?i:-1).filter(i=>i>=0),{closeAfter:true});
+  $('#saveTableRowsTop').onclick=batch;$('#saveTableRowsBottom').onclick=batch;
 }
-
 
 
 // Reconcile only screenshot-provisional products, by exact code, preserving personal settings.
