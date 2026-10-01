@@ -236,3 +236,16 @@ main{max-width:1120px;padding:22px 18px 86px}
   .history-store-control{display:block;width:100%}
   .history-store-control select{display:block;width:100%;max-width:none;margin-top:5px}
 }
+
+/* v1.6.0 real-screen operation guide */
+.guide-real-figure{position:relative;margin:14px 0 20px;border:2px solid #a8c6ec;border-radius:18px;overflow:hidden;background:#f5f9ff}
+.guide-real-figure img{display:block;width:100%;height:auto}
+.guide-real-figure figcaption{padding:11px 14px;background:#fff;color:#53657a;font-weight:750;line-height:1.55;border-top:1px solid #d7e4f3}
+.guide-real-badge{position:absolute;top:10px;left:10px;z-index:2;background:#1769e0;color:white;border-radius:999px;padding:7px 11px;font-size:13px;font-weight:900;box-shadow:0 3px 10px #1234}
+.guide-screen-steps{margin-top:10px;padding:12px 14px;border:1px solid #bcd5ef;border-radius:14px;background:#f7fbff}
+.guide-screen-steps b{display:block;color:#124c91;margin-bottom:5px}
+.guide-screen-steps span{display:block;line-height:1.6}
+@media(max-width:760px){
+ .guide-real-figure{border-radius:14px}
+ .guide-real-badge{font-size:12px;padding:6px 9px}
+}
