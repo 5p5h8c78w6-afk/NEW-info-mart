@@ -1650,7 +1650,11 @@ function bind(){
   $("#calendarFilter")?.addEventListener("change",e=>{CALENDAR_FILTER=e.target.value||"all";render()});
   $("#calendarTradeStore")?.addEventListener("change",e=>{CALENDAR_TRADE_STORE=e.target.value||"all";render()});
   $("#calendarImportBtn")?.addEventListener("click",()=>$("#calendarImportFiles")?.click());
-  $("#calendarImportFiles")?.addEventListener("change",e=>importInfomartTradeFiles(e.target.files));
+  $("#calendarImportFiles")?.addEventListener("change",async e=>{
+    const input=e.target;
+    try{await importInfomartTradeFiles(input.files)}
+    finally{input.value=""}
+  });
   $$("[data-cal-day]").forEach(b=>b.onclick=()=>calendarDayDialog(b.dataset.calDay));
   $$("[data-ev]").forEach(b=>b.onclick=async()=>{if(await requireAdmin("発注先マスターを編集"))vendorDialog(b.dataset.ev)});
   $$("[data-schedule-import]").forEach(b=>b.onclick=async()=>{if(await requireAdmin("紙スケジュールを読み込む")){SCHEDULE_VENDOR_ID=b.dataset.scheduleImport;$("#scheduleOcrFiles").click()}});
