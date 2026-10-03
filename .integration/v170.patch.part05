@@ -1,0 +1,70 @@
++  <section class="card"><h3>クラウド同期・正式ユーザー管理</h3><p class="muted">無料ルート：GitHub Pages + Supabase Free。会社・店舗・権限・共通商品マスターをクラウド管理できます。</p><button class="btn secondary full" data-nav="cloud">クラウド設定を開く</button></section>
+   <section class="card"><h3>システムチェック</h3>${h.map(x=>`<div class="health-grid"><div><strong>${esc(x.label)}</strong><br><span class="muted">${esc(x.detail)}</span></div><div class="${x.status==="OK"?"health-ok":x.status==="NG"?"health-bad":"health-warn"}">${esc(x.status)}</div></div>`).join("")}<div style="height:10px"></div><button class="btn secondary full" id="healthDetails">詳しい診断を見る</button></section>
+   <section class="card" id="backupSection"><h3>バックアップ / 復元</h3><div class="grid2"><button class="btn secondary" id="exportAll">全利用者バックアップ</button><button class="btn secondary" id="exportProfile">現在利用者だけ</button></div><div style="height:8px"></div><button class="btn secondary full" id="import">バックアップから復元</button><div style="height:8px"></div><button class="btn secondary full" id="restoreSnapshot">自動復元ポイントを見る（${sn.length}件）</button></section>
+   <section class="card" id="masterSection"><h3>共通マスター保守 <span class="master-badge">v${ROOT.masterVersion||1}</span></h3><p class="muted">管理者だけが操作できます。個人プリセット・数量・発注間隔・履歴は消しません。</p><div class="grid2"><button class="btn secondary" id="restoreInitial">初期マスターへ復元</button><button class="btn secondary" id="importMaster">マスターだけ更新</button></div><div style="height:8px"></div><button class="btn secondary full" id="exportMaster">現在の共通マスターを書き出す</button></section>
+@@ -1607,7 +2050,7 @@
+   document.body.dataset.view=view;
+   if($("#profileName"))$("#profileName").textContent=activeProfile()?.name||"利用者";
+   if($("#adminBtn")){$("#adminBtn").textContent=adminActive()?"🔓":"🔒";$("#adminBtn").classList.toggle("admin-on",adminActive())}
+-  let m=$("#main");m.innerHTML=view==="home"?home():view==="guide"?guidePage():view==="catalog"?catalogPage():view==="today"?todayView():view==="calendar"?calendarPage():view==="history"?historyPage():view==="vendors"?vendors():view==="products"?products():view==="presets"?presets():view==="paper"?paperPage():view==="mobile"?mobileHelperPage():settings();
++  let m=$("#main");m.innerHTML=view==="home"?home():view==="guide"?guidePage():view==="catalog"?catalogPage():view==="today"?todayView():view==="calendar"?calendarPage():view==="history"?historyPage():view==="vendors"?vendors():view==="products"?products():view==="presets"?presets():view==="paper"?paperPage():view==="mobile"?mobileHelperPage():view==="cloud"?cloudPage():settings();
+   if(view==="backup"||view==="admin"){
+     const keep=view==="backup"?["backupSection"]:["adminSection","masterSection"];
+     $$("#main > section").forEach(el=>{if(!keep.includes(el.id))el.remove()});
+@@ -1636,6 +2079,28 @@
+   $$("[data-catalog-check]").forEach(c=>c.onchange=()=>{if(c.checked)CATALOG_SELECTION.add(c.dataset.catalogCheck);else CATALOG_SELECTION.delete(c.dataset.catalogCheck);const n=$("#catalogSelectedCount");if(n)n.textContent=CATALOG_SELECTION.size;const b=$("#catalogAddSelected");if(b)b.disabled=!CATALOG_SELECTION.size});
+   $$("[data-catalog-one]").forEach(b=>b.onclick=()=>catalogAddProducts([b.dataset.catalogOne]));
+   $("#catalogAddSelected")?.addEventListener("click",()=>catalogAddProducts([...CATALOG_SELECTION]));
++  $("#cloudSaveConfig")?.addEventListener("click",()=>{
++    const url=cloudSanitizeProjectUrl($("#cloudProjectUrl")?.value),key=String($("#cloudPublicKey")?.value||"").trim();
++    if(!/^https:\/\/.+/i.test(url)){alert("Project URLは https:// から入力してください。");return}
++    if(key.length<20){alert("Publishable keyを入力してください。");return}
++    if(!cloudPublicKeyIsSafe(key)){alert("このキーは保存しません。SupabaseのPublishable key（旧形式ならanon key）だけを使ってください。Secret / service_role keyは禁止です。");return}
++    ROOT.cloud=normalizeCloud({...ROOT.cloud,projectUrl:url,publicKey:key,session:null,orgId:"",orgName:"",role:"",storeId:"",storeName:"",members:[],stores:[]});
++    persistRoot();render();alert("Supabase接続設定を保存しました。");
++  });
++  $("#cloudCopySql")?.addEventListener("click",async()=>{if(await clip(CLOUD_SETUP_SQL))alert("セットアップSQLをコピーしました。SupabaseのSQL Editorへ貼り付けてRunしてください。");else prompt("コピーできない場合はこのSQLをコピーしてください",CLOUD_SETUP_SQL)});
++  $("#cloudSignUp")?.addEventListener("click",cloudSignUp);
++  $("#cloudSignIn")?.addEventListener("click",cloudSignIn);
++  $("#cloudSignOut")?.addEventListener("click",cloudSignOut);
++  $("#cloudCreateUserCode")?.addEventListener("click",cloudCreateUserCode);
++  $("#cloudCopyUserCode")?.addEventListener("click",async()=>{const code=ROOT.cloud?.userCode||"";if(!code)return;if(await clip(code))alert("登録コードをコピーしました。");else prompt("このコードをコピーしてください",code)});
++  $("#cloudCreateOrg")?.addEventListener("click",cloudCreateOrg);
++  $("#cloudRefresh")?.addEventListener("click",async()=>{try{await cloudLoadContext({silent:true});render();alert("クラウド情報を更新しました。")}catch(e){alert(cloudErrorMessage(e))}});
++  $("#cloudAddMember")?.addEventListener("click",cloudAddMemberDialog);
++  $("#cloudAddStore")?.addEventListener("click",cloudAddStore);
++  $("#cloudDownloadMaster")?.addEventListener("click",cloudDownloadMaster);
++  $("#cloudUploadMaster")?.addEventListener("click",cloudUploadMaster);
++  $("#cloudCheckLatest")?.addEventListener("click",cloudCheckLatest);
++  $$("[data-cloud-member]").forEach(b=>b.onclick=()=>cloudMemberDialog(b.dataset.cloudMember));
+   $("#returnHealth")?.addEventListener("click",healthDialog);
+   $$("[data-paper-open]").forEach(b=>b.onclick=()=>scheduleViewDialog(b.dataset.paperOpen));
+   $$("[data-one]").forEach(b=>b.onclick=()=>startOne(b.dataset.one));
+@@ -1666,6 +2131,8 @@
+   $("#addVendor")?.addEventListener("click",async()=>{if(await requireAdmin("発注先マスターを追加"))vendorDialog()});
+   $("#addProduct")?.addEventListener("click",async()=>{if(await requireAdmin("共通商品を追加"))productMasterDialog()});
+   $("#domImport")?.addEventListener("click",async()=>{if(await requireAdmin("DOMから商品を取り込む"))domImportDialog()});
++  $("#catalogDiff")?.addEventListener("click",async()=>{if(await requireAdmin("Infomart商品一覧との差分を確認"))$("#catalogDiffFiles")?.click()});
++  $("#catalogDiffFiles")?.addEventListener("change",e=>catalogDiffFilesSelected(e.target.files));
+   $("#batchOcr")?.addEventListener("click",async()=>{if(await requireAdmin("画像から行を補助登録"))$("#ocrFiles").click()});
+   $("#addPreset")?.addEventListener("click",()=>presetDialog());
+   $("#todayAuto")?.addEventListener("click",runToday);
+@@ -1728,7 +2195,7 @@
+   let existing=id?MP(id):null,p=existing?clone(existing):{id:uid(),code:"",name:"",vendorId:ROOT.commonMaster.vendors[0]?.id||"",leadDaysOverride:null,scheduleClass:"standard"};
+   modal(`<h2>${id?"共通商品を編集":"共通商品を追加"}</h2><div class="field"><label>商品コード</label><input id="mc" ${p.domSource||p.imageSource?"readonly":""} value="${esc(p.code)}"></div><div class="field"><label>商品名</label><input id="mn" ${p.domSource||p.imageSource?"readonly":""} value="${esc(p.name)}"></div><div class="field"><label>内容量・規格</label><input id="mspec" ${p.domSource||p.imageSource?"readonly":""} value="${esc(productSpecText(p)==="未取得"?"":productSpecText(p))}" placeholder="例：1kg×6/箱・6/PC"><span class="help">DOM/OCR取込では読み取った規格を表示します。手動登録では入力できます。</span></div><div class="field"><label>発注先</label><select id="mv"><option value="">選択</option>${ROOT.commonMaster.vendors.map(v=>`<option value="${v.id}" ${p.vendorId===v.id?"selected":""}>${esc(v.name)}</option>`).join("")}</select></div><div class="field"><label>商品だけ最短納品日数が違う場合</label><input id="ml" type="number" min="0" value="${p.leadDaysOverride??""}" placeholder="空欄なら発注先設定"></div><label class="check"><input id="mdec" type="checkbox" ${p.allowDecimalQty===true?"checked":""}><strong>数量に小数を許可する</strong>（通常はOFF）</label><div class="field"><label>紙スケジュール区分</label><select id="msc"><option value="standard" ${String(p.scheduleClass||"standard")==="standard"?"selected":""}>通常</option>${[...new Set(ROOT.commonMaster.vendors.flatMap(v=>(v.scheduleEntries||[]).map(x=>String(x.classKey||"standard"))))].filter(x=>x!=="standard").map(x=>`<option value="${esc(x)}" ${String(p.scheduleClass||"standard")===x?"selected":""}>${esc(scheduleClassLabel(x))}</option>`).join("")}</select><span class="help">紙に5日前 / 8日前 / 10日前などの区分がある商品だけ変更します。</span></div><div class="notice">数量・発注間隔・最初の発注日は各利用者が個別設定できます。</div><button class="btn full" id="sm">保存</button>${id?'<button class="btn red full" id="dm" style="margin-top:8px">共通マスターから削除</button>':""}`);
+   if(p.domSource)showDomRow(p.domSource,$("#modalBody"));
+-  $("#sm").onclick=()=>{let code=$("#mc").value.trim(),vendorId=$("#mv").value;if(!/^\d{7,13}$/.test(code)||!vendorId){alert("7〜13桁の商品コードと発注先を確認してください");return}if(p.domSource){try{validateDomRow(p.domSource);if(code!==p.domSource.code)throw Error("DOMコード不一致")}catch(e){alert(e.message);return}}if(ROOT.commonMaster.products.some(x=>x.code===code&&x.id!==p.id)){alert("同じ商品コードがあります");return}checkpoint("商品マスター変更前");Object.assign(p,{code,name:p.domSource?p.domSource.name:p.imageSource?p.name:$("#mn").value.trim(),specification:p.domSource?p.domSource.specification:p.imageSource?(p.specification||""):$("#mspec").value.trim(),vendorId,leadDaysOverride:$("#ml").value===""?null:+$("#ml").value,scheduleClass:$("#msc").value||"standard",allowDecimalQty:$("#mdec").checked});if(id){let i=ROOT.commonMaster.products.findIndex(x=>x.id===id);ROOT.commonMaster.products[i]=p}else ROOT.commonMaster.products.push(p);ROOT.masterVersion++;syncMasterToProfiles();save("商品マスター更新");$("#modal").close()};
++  $("#sm").onclick=()=>{let code=$("#mc").value.trim(),vendorId=$("#mv").value;if(!/^\d{7,13}$/.test(code)||!vendorId){alert("7〜13桁の商品コードと発注先を確認してください");return}if(p.domSource){try{validateDomRow(p.domSource);if(code!==p.domSource.code)throw Error("DOMコード不一致")}catch(e){alert(e.message);return}}if(ROOT.commonMaster.products.some(x=>x.code===code&&x.id!==p.id)){alert("同じ商品コードがあります");return}checkpoint("商品マスター変更前");Object.assign(p,{code,name:p.domSource?p.domSource.name:p.imageSource?p.name:$("#mn").value.trim(),specification:p.domSource?p.domSource.specification:p.imageSource?(p.specification||""):$("#mspec").value.trim(),vendorId,leadDaysOverride:$("#ml").value===""?null:+$("#ml").value,scheduleClass:$("#msc").value||"standard",allowDecimalQty:$("#mdec").checked,catalogStatus:p.catalogStatus||(p.domSource?"listed":"unverified")});if(id){let i=ROOT.commonMaster.products.findIndex(x=>x.id===id);ROOT.commonMaster.products[i]=p}else ROOT.commonMaster.products.push(p);ROOT.masterVersion++;syncMasterToProfiles();save("商品マスター更新");$("#modal").close()};
+   $("#dm")?.addEventListener("click",()=>{if(!confirm("全利用者の共通商品から外します。個人設定は安全のため孤立データとして残します。続けますか？"))return;checkpoint("商品マスター削除前");ROOT.commonMaster.products=ROOT.commonMaster.products.filter(x=>x.id!==id);ROOT.masterVersion++;syncMasterToProfiles();save("商品マスター削除");$("#modal").close()})
+ }
+ 
+@@ -1990,10 +2457,11 @@
+ 
+ function safeFileName(s){return String(s||"user").replace(/[\\/:*?"<>|]/g,"_").slice(0,60)}
+ function downloadJson(obj,name){let b=new Blob([JSON.stringify(obj,null,2)],{type:"application/json"}),a=document.createElement("a");a.href=URL.createObjectURL(b);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
+-function exportAllJson(){ROOT.lastExportAt=new Date().toISOString();persistRoot();downloadJson({type:"infomartOrderNav.multiuser",schemaVersion:SCHEMA_VERSION,exportedAt:ROOT.lastExportAt,root:ROOT},`InfomartOrder_ALL_USERS_${iso(today())}.json`);render()}
++function backupSafeRoot(){const r=clone(ROOT);r.cloud=cloudDefault();return r}
++function exportAllJson(){ROOT.lastExportAt=new Date().toISOString();persistRoot();downloadJson({type:"infomartOrderNav.multiuser",schemaVersion:SCHEMA_VERSION,exportedAt:ROOT.lastExportAt,root:backupSafeRoot()},`InfomartOrder_ALL_USERS_${iso(today())}.json`);render()}
+ function exportProfileJson(){let p=activeProfile();ROOT.lastExportAt=new Date().toISOString();persistRoot();downloadJson({type:"infomartOrderNav.profile",schemaVersion:SCHEMA_VERSION,exportedAt:ROOT.lastExportAt,profile:{name:p.name,data:p.data}},`InfomartOrder_${safeFileName(p.name)}_${iso(today())}.json`);render()}
+ function exportMaster(){ROOT.lastMasterExportAt=new Date().toISOString();persistRoot();downloadJson(commonMasterPackage(),`initial_master_v${ROOT.masterVersion}_${iso(today())}.json`)}
+-function snapshotDialog(){let list=getSnapshots();if(!list.length){alert("復元ポイントはまだありません。");return}modal(`<h2>復元ポイント</h2><p class="muted">復元前の状態も自動保存します。</p>${list.map(x=>`<div class="snapshot-row"><strong>${esc(new Date(x.at).toLocaleString("ja-JP"))}</strong><br><span class="muted">${esc(x.reason||"自動保存")}</span><br><button class="btn secondary small" data-rs="${x.id}">この状態へ戻す</button></div>`).join("")}`);$$("[data-rs]",$("#modalBody")).forEach(b=>b.onclick=()=>{if(!confirm("この復元ポイントへ戻しますか？"))return;let x=list.find(s=>s.id===b.dataset.rs);if(!x)return;checkpoint("復元前");try{ROOT=JSON.parse(x.data);ROOT.schemaVersion=SCHEMA_VERSION;ACTIVE_ID=ROOT.activeProfileId||ROOT.profiles[0].id;S=activeProfile().data;persistRoot();$("#modal").close();view="home";render();alert("復元しました")}catch(e){alert("復元できません："+e.message)}})}
