@@ -1,0 +1,159 @@
++    ...Object.fromEntries(['specification','vendorDisplay','screenshotSource','domSyncStatus','screenshotReviewBeforeDom','domMatchedAt','catalogStatus','catalogLastSeenAt','catalogLastCheckAt','catalogLastFullScanAt','catalogSource','catalogChangedAt'].filter(k=>mp[k]!==undefined).map(k=>[k,clone(mp[k])])),
+     vendorId:mp.vendorId,
+     leadDaysOverride:mp.leadDaysOverride,
+     scheduleClass:String(mp.scheduleClass||old?.scheduleClass||"standard"),
+@@ -222,6 +223,7 @@
+       r.commonMaster.products=Array.isArray(r.commonMaster.products)?r.commonMaster.products:[];
+       if(!r.profiles.some(p=>p.id===r.activeProfileId))r.activeProfileId=r.profiles[0].id;
+       r.admin=r.admin||{pinHash:null};
++      r.cloud=normalizeCloud(r.cloud);
+       return r;
+     }
+   }catch(_){}
+@@ -229,6 +231,7 @@
+ }
+ 
+ let ROOT=loadRoot();
++ROOT.cloud=normalizeCloud(ROOT.cloud);
+ ROOT.commonMaster.vendors=(ROOT.commonMaster.vendors||[]).map(normalizeVendor);
+ let ACTIVE_ID=ROOT.activeProfileId;
+ let S=activeProfile().data;
+@@ -248,6 +251,11 @@
+ function adminActive(){return Date.now()<ADMIN_UNTIL}
+ async function sha256(text){const data=new TextEncoder().encode(text);const hash=await crypto.subtle.digest("SHA-256",data);return [...new Uint8Array(hash)].map(b=>b.toString(16).padStart(2,"0")).join("")}
+ async function requireAdmin(reason="共通マスターを変更"){
++  if(cloudLoggedIn()&&ROOT.cloud?.orgId){
++    try{await cloudEnsureFreshSession()}catch(e){alert("クラウド管理中のため再ログインが必要です。\n"+cloudErrorMessage(e));return false}
++    if(!cloudIsAdminRole()){alert(`この操作はオーナーまたは管理者だけが実行できます。\n現在の権限：${cloudRoleLabel(ROOT.cloud.role)}`);return false}
++    return true;
++  }
+   if(adminActive())return true;
+   if(!ROOT.admin.pinHash){
+     const a=prompt("管理者PINを初回設定します。4文字以上で入力してください。");
+@@ -543,6 +551,7 @@
+     if(!p.code)issue("商品コードが空の商品があります");
+     if(p.domSource){try{validateDomRow(p.domSource);if(p.code!==p.domSource.code)throw Error("コード不一致")}catch(err){issue(`商品 ${p.code} のDOM照合エラー：${err.message}`)}}
+     if(p.imageSource)warning(`商品 ${p.code} は画像由来・DOM未確認です。自動入力は停止。共通マスターから削除後、DOM経路で登録し直してください。`);
++    if(p.catalogStatus==="not-listed-candidate")warning(`商品 ${p.code} はInfomart掲載なし候補です。自動削除はしていません。Infomartの商品一覧を確認してください。`);
+     if(p.code){codes.set(p.code,(codes.get(p.code)||0)+1)}
+     if(!V(p.vendorId))issue(`商品 ${p.code||p.name||"(不明)"} の発注先が未設定です`);
+   }
+@@ -649,7 +658,8 @@
+     ["guide","？","画像つき操作ガイド","はじめての方も安心"],
+     ["products","商","商品・個人設定","通常数量・発注間隔を変更"],
+     ["health","✓","システムチェックを見る","安全な状態を確認"],
+-    ["backup","☁","バックアップ・復元をする","データの保存・復元"],
++    ["cloud","☁","クラウド同期・利用者","無料クラウド・店舗・権限管理"],
++    ["backup","↥","バックアップ・復元をする","データの保存・復元"],
+     ["admin","⚙","管理者設定を開く","商品・利用者設定など"]
+   ];
+   return `<section class="friendly-home-menu">
+@@ -705,7 +715,7 @@
+   </section>
+ 
+   <section class="guide-section" id="guide-product" data-guide-keywords="商品 登録 OCR DOM スクショ 商品コード 内容量 規格 発注先 信頼度 仮登録">
+-    <h2>3. 商品を登録する【基本商品は管理者が準備】</h2>
++    <h2>3. 商品を登録する【基本商品は管理者が準備】</h2><div class="success"><strong>管理者の標準手順：</strong>Infomartの商品一覧でPC拡張の「商品差分チェック用JSONを保存」→ 発注ナビの商品画面「新商品・内容変更をチェック」→ JSONをまとめて選択 → 必要な新商品・変更だけ反映。一般利用者はTOPの「発注先から商品を選ぶ」を使います。</div><div class="notice"><strong>掲載なし候補について：</strong>Infomartの商品一覧を全ページ分保存できた時だけ「全ページ分です」をONにします。1ページでも抜けている場合はOFFのままにしてください。候補になっても自動削除・自動停止はしません。</div>
+     <div class="success"><strong>普段使う人：</strong>商品一覧に必要な商品が見えていれば、商品登録は不要です。そのまま「個人設定」→「プリセット」へ進んでください。</div>
+     <div class="notice"><strong>管理者：</strong>よく使う基本商品は共通マスターへあらかじめ登録して配布します。一般利用者に全商品を1件ずつ登録させない運用を推奨します。</div>
+     ${guideFigure("guide-03-product.svg","商品コード・規格・発注先を確認して商品を登録する説明図")}
+@@ -776,7 +786,7 @@
+ 
+   <section class="guide-section" id="guide-trouble" data-guide-keywords="困った エラー OCR 読めない 更新 古い システムチェック 自動入力 動かない">
+     <h2>12. 困ったとき</h2>${guideFigure("guide-08-trouble.svg","システムチェックとバックアップで困った時に確認する説明図")}
+-    <details open><summary>商品が一覧にない</summary><p>まず管理者へ確認してください。基本商品は共通マスターへ登録しておくのが標準です。本当に新商品・未登録商品ならスマホOCRを使います。</p></details>
++    <details open><summary>商品が一覧にない</summary><p>管理者は「商品・個人設定」→「新商品・内容変更をチェック」でInfomart商品一覧との差分を確認してください。新商品なら確認して共通マスターへ追加します。一般利用者は共通マスターへ直接追加せず、「発注先から商品を選ぶ」を使います。</p></details>
+     <details><summary>OCRがうまく読めない</summary><p>商品コードから右端の発注先まで全部写す／画面を少し拡大してスクショする／読取信頼度の低い項目を元画像と照合して修正します。</p></details>
+     <details><summary>数量自動入力が動かない</summary><p>Safari/ChromeでInfomartの商品一覧を開いているか、初回設定済みか、数量データ作成から60分以内かを確認。本人確認不一致なら安全停止します。</p></details>
+     <details><summary>発注予定が出ない</summary><p>「発注予定へ自動追加」がONか、最初の発注日と発注間隔、発注先の曜日・祝日・カレンダー確認を確認。</p></details>
+@@ -1551,11 +1561,34 @@
+   alert(`${add.length}商品を「${pr.name}」へ追加しました。`);
+ }
+ 
++function catalogStatusInfo(p){
++  if(p.catalogStatus==="listed")return {label:"掲載確認済み",cls:"ok"};
++  if(p.catalogStatus==="not-listed-candidate")return {label:"掲載なし候補",cls:"warn"};
++  if(p.imageSource&&!p.domSource)return {label:"画像仮登録",cls:"warn"};
++  if(p.domSource)return {label:"DOM登録済み",cls:"neutral"};
++  return {label:"掲載未確認",cls:"neutral"};
++}
++function catalogMasterCounts(){
++  const ps=ROOT.commonMaster.products||[];
++  return {
++    total:ps.length,
++    listed:ps.filter(p=>p.catalogStatus==="listed").length,
++    missing:ps.filter(p=>p.catalogStatus==="not-listed-candidate").length,
++    unchecked:ps.filter(p=>!p.catalogStatus).length
++  };
++}
+ function products(){
++  const mc=catalogMasterCounts();
+   return `<button class="btn secondary small" data-nav="home">← ホーム</button><div class="section">商品</div>
+-  <section class="card"><p class="muted">商品コード・商品名・発注先は共通マスター。数量・発注間隔・最初の発注日は利用者ごとに保存されます。</p><div class="grid2"><button class="btn" id="domImport">Infomartの商品行から追加（PC推奨）</button><button class="btn secondary" id="batchOcr">スクショの商品表から追加（補助）</button><button class="btn secondary" id="addProduct">手動登録</button></div></section>
+-  ${S.products.map(p=>`<section class="card ${p.masterOrphan?"danger-zone":""}"><h3>${esc(p.name||p.code)}</h3>${p.imageSource?`<img src="${esc(p.imageSource.startsWith("data:image/png;base64,")?p.imageSource:"")}" alt="登録した元画像の行" style="max-width:100%"><p>${p.domSource?"画像由来・DOM完全一致照合済み":"画像由来・DOM未確認（仮登録）"}</p>`:""}<div class="muted">商品コード ${esc(p.code)}</div><p><strong>内容量・規格：</strong>${esc(productSpecText(p))}</p><p>数量 ${esc(p.defaultQty)} / ${esc(intLabel(p))} / 数量${p.allowDecimalQty===true?"小数可":"整数のみ"} / 最短${esc(lead(p))}日後${V(p.vendorId)?.scheduleMode==="dated"?` / ${esc(scheduleClassLabel(p.scheduleClass||"standard"))}`:""}</p><p class="muted">発注先：${esc(V(p.vendorId)?.name||"未設定")}</p>${p.masterOrphan?'<p class="error">共通マスターから削除済み。発注には使われません。</p>':""}<button class="btn secondary small" data-ep="${p.id}">個人設定を編集</button> <button class="btn secondary small" data-emp="${p.id}">共通情報を管理者編集</button></section>`).join("")}`
++  <section class="card base-master-card"><div class="base-master-head"><div><h2>共通商品マスター</h2><p class="muted">一般利用者はここで商品登録せず、「発注先から商品を選ぶ」から自分のプリセットへ追加します。共通商品マスターは管理者が整備します。</p></div><span class="master-badge">v${ROOT.masterVersion||1}</span></div>
++    <div class="base-master-stats"><div><strong>${mc.total}</strong><span>登録商品</span></div><div><strong>${mc.listed}</strong><span>掲載確認済み</span></div><div><strong>${mc.missing}</strong><span>掲載なし候補</span></div><div><strong>${mc.unchecked}</strong><span>掲載未確認</span></div></div>
++    <div class="notice"><strong>新商品チェック：</strong>Infomartの商品一覧をDOMで読み取り、共通マスターと商品コードで照合します。新商品・内容変更・登録済みを分けて表示し、確認したものだけ反映します。</div>
++    <div class="grid2"><button class="btn" id="catalogDiff">新商品・内容変更をチェック（PC）</button><button class="btn secondary" id="domImport">商品行から直接追加（PC）</button><button class="btn secondary" id="batchOcr">スクショの商品表から追加（補助）</button><button class="btn secondary" id="addProduct">手動登録</button></div>
++    <input id="catalogDiffFiles" type="file" accept=".json,application/json" multiple hidden>
++  </section>
++  ${(S.products||[]).map(p=>{const cs=catalogStatusInfo(p);return `<section class="card ${p.masterOrphan?"danger-zone":""}"><div class="product-master-title"><h3>${esc(p.name||p.code)}</h3><span class="catalog-status ${cs.cls}">${esc(cs.label)}</span></div>${p.imageSource?`<img src="${esc(p.imageSource.startsWith("data:image/png;base64,")?p.imageSource:"")}" alt="登録した元画像の行" style="max-width:100%"><p>${p.domSource?"画像由来・DOM完全一致照合済み":"画像由来・DOM未確認（仮登録）"}</p>`:""}<div class="muted">商品コード ${esc(p.code)}</div><p><strong>内容量・規格：</strong>${esc(productSpecText(p))}</p><p>数量 ${esc(p.defaultQty)} / ${esc(intLabel(p))} / 数量${p.allowDecimalQty===true?"小数可":"整数のみ"} / 最短${esc(lead(p))}日後${V(p.vendorId)?.scheduleMode==="dated"?` / ${esc(scheduleClassLabel(p.scheduleClass||"standard"))}`:""}</p><p class="muted">発注先：${esc(V(p.vendorId)?.name||"未設定")}</p>${p.catalogLastSeenAt?`<p class="catalog-last-seen">Infomart最終確認：${esc(new Date(p.catalogLastSeenAt).toLocaleString("ja-JP"))}</p>`:""}${p.catalogStatus==="not-listed-candidate"?'<p class="error"><strong>掲載なし候補：</strong>全ページ確認時にInfomart商品一覧で見つかりませんでした。自動削除・自動停止はしていません。</p>':""}${p.masterOrphan?'<p class="error">共通マスターから削除済み。発注には使われません。</p>':""}<button class="btn secondary small" data-ep="${p.id}">個人設定を編集</button> <button class="btn secondary small" data-emp="${p.id}">共通情報を管理者編集</button></section>`}).join("")}`
+ }
++
+ function presetCard(pr){
+   const results=(pr.items||[]).map(preflightItemForPreset),groups=groupPresetPreflight(results);
+   const blockers=results.filter(x=>!x.ok).length,cutoff=results.filter(x=>x.ok&&x.cutoffPassed).length;
+@@ -1590,10 +1623,420 @@
+     ${list.length?`<div class="preset-grid">${list.map(presetCard).join("")}</div>`:'<section class="card empty-state">条件に合うプリセットはありません。</section>'}`;
+ }
+ 
++
++function cloudDefault(){
++  return {
++    projectUrl:"",
++    publicKey:"",
++    session:null,
++    orgId:"",
++    orgName:"",
++    role:"",
++    storeId:"",
++    storeName:"",
++    displayName:"",
++    directoryName:"",
++    userCode:"",
++    stores:[],
++    members:[],
++    lastMasterVersion:0,
++    remoteMasterVersion:0,
++    remoteMasterUpdatedAt:"",
++    lastSyncAt:"",
++    lastContextAt:""
++  };
++}
++function normalizeCloud(x){
++  x=x&&typeof x==="object"?x:{};
++  const d=cloudDefault();
++  return {
++    ...d,...x,
++    projectUrl:String(x.projectUrl||""),
++    publicKey:String(x.publicKey||""),
++    session:x.session&&typeof x.session==="object"?x.session:null,
++    stores:Array.isArray(x.stores)?x.stores:[],
++    members:Array.isArray(x.members)?x.members:[]
++  };
++}
++function cloudConfigured(){
++  const c=ROOT.cloud||cloudDefault();
++  return /^https:\/\/.+/i.test(c.projectUrl||"")&&String(c.publicKey||"").length>=20;
++}
++function cloudLoggedIn(){return !!ROOT.cloud?.session?.access_token}
++function cloudRoleLabel(r){return ({owner:"オーナー",admin:"管理者",manager:"店長",orderer:"発注担当",viewer:"閲覧のみ"})[r]||r||"未設定"}
++function cloudIsAdminRole(){return ["owner","admin"].includes(ROOT.cloud?.role||"")}
++function cloudStoreName(id){return (ROOT.cloud?.stores||[]).find(s=>s.id===id)?.name||""}
++function cloudSanitizeProjectUrl(s){return String(s||"").trim().replace(/\/+$/,"")}
++function cloudPublicKeyIsSafe(key){
++  const k=String(key||"").trim();
++  if(/^sb_secret_/i.test(k)||/service[_-]?role/i.test(k))return false;
++  if(/^sb_publishable_/i.test(k))return true;
++  if(k.startsWith("eyJ")){
++    try{
