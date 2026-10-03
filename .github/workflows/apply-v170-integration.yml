@@ -1,0 +1,56 @@
+name: Apply v1.7.0 integration
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/apply-v170-integration.yml"
+      - ".integration/v170.patch.part*"
+
+permissions:
+  contents: write
+
+jobs:
+  integrate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout current main
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Rebuild and verify integration patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .integration/v170.patch.part* > /tmp/v170.patch
+          echo "6e6a2cce1f30d058043594e69ab4a570d69f0616f2e5e74319cb6360f8e387ad  /tmp/v170.patch" | sha256sum -c -
+          git apply --check /tmp/v170.patch
+          git apply /tmp/v170.patch
+
+      - name: Validate merged site
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --check app.js
+          node --check sw.js
+          node tests/calendar-import.test.cjs
+          grep -q 'const APP_VERSION="1.7.0";' app.js
+          grep -q 'finally{input.value=""}' app.js
+          grep -q 'function cloudPage()' app.js
+          grep -q '新商品・内容変更をチェック' app.js
+          grep -q 'const C="infomart-order-nav-v1.7.0";' sw.js
+          echo "141d33461d7bbcf8d465e7210e27f057df8e447bcd0233cf9e678532442e7505  app.js" | sha256sum -c -
+          echo "76372edd8ee969f522f428ce6172dbd5974bfd84da793411719881c07204e094  styles.css" | sha256sum -c -
+          echo "059b50e098fb27d460c774bf0690fb12ea248a612fa63d396b8a372104b714a2  sw.js" | sha256sum -c -
+
+      - name: Commit integrated v1.7.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.js styles.css sw.js
+          git diff --cached --quiet && exit 0
+          git commit -m "Integrate v1.7.0 cloud foundation"
+          git push origin HEAD:main
