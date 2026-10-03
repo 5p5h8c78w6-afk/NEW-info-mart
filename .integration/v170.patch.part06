@@ -1,0 +1,91 @@
++function snapshotDialog(){let list=getSnapshots();if(!list.length){alert("復元ポイントはまだありません。");return}modal(`<h2>復元ポイント</h2><p class="muted">復元前の状態も自動保存します。</p>${list.map(x=>`<div class="snapshot-row"><strong>${esc(new Date(x.at).toLocaleString("ja-JP"))}</strong><br><span class="muted">${esc(x.reason||"自動保存")}</span><br><button class="btn secondary small" data-rs="${x.id}">この状態へ戻す</button></div>`).join("")}`);$$("[data-rs]",$("#modalBody")).forEach(b=>b.onclick=()=>{if(!confirm("この復元ポイントへ戻しますか？"))return;let x=list.find(s=>s.id===b.dataset.rs);if(!x)return;checkpoint("復元前");try{ROOT=JSON.parse(x.data);ROOT.schemaVersion=SCHEMA_VERSION;ROOT.cloud=normalizeCloud(ROOT.cloud);ACTIVE_ID=ROOT.activeProfileId||ROOT.profiles[0].id;S=activeProfile().data;persistRoot();$("#modal").close();view="home";render();alert("復元しました")}catch(e){alert("復元できません："+e.message)}})}
+ function userSelector(startup=false){
+   modal(`<h2>${startup?"利用者を選んで開始":"利用者"}</h2><p class="muted">共有PCなので、必ず自分の名前を選んでください。</p>${ROOT.profiles.map(p=>`<div class="user-row"><div><strong>${esc(p.name)}</strong>${p.id===ACTIVE_ID?' <span class="badge green">現在</span>':""}</div><button class="btn ${p.id===ACTIVE_ID?"green":"secondary"} small" data-su="${p.id}">${startup&&p.id===ACTIVE_ID?"この利用者で開始":"選択"}</button></div>`).join("")}<div class="section">利用者を追加</div><div class="field"><label>利用者名</label><input id="newUserName" placeholder="例：Aさん"></div><button class="btn full" id="addUser">利用者を追加</button>${startup?"":'<div class="section">管理</div><button class="btn secondary full" id="renameUser">現在の利用者名を変更</button><button class="btn red full" id="deleteUser" style="margin-top:8px">現在の利用者を削除</button>'}`);
+   $$("[data-su]",$("#modalBody")).forEach(b=>b.onclick=()=>{$("#modal").close();switchProfile(b.dataset.su);lastActivity=Date.now()});
+@@ -2075,7 +2543,7 @@
+   alert("共通マスターを初期状態へ戻しました。個人プリセットと履歴は保持しています。")
+ }
+ 
+-$("#importFile").addEventListener("change",async e=>{let f=e.target.files?.[0];if(!f)return;try{let o=JSON.parse(await f.text());checkpoint("バックアップ復元前");if(o?.type==="infomartOrderNav.multiuser"&&o.root?.profiles?.length){if(!confirm("全利用者バックアップで現在データを置き換えますか？"))return;ROOT=o.root;if(ROOT.schemaVersion!==SCHEMA_VERSION)ROOT=migrateImportedRoot(ROOT);ACTIVE_ID=ROOT.activeProfileId||ROOT.profiles[0].id;S=activeProfile().data;persistRoot();view="home";render();alert("復元しました")}else if(o?.type==="infomartOrderNav.profile"&&o.profile?.data){let p=newProfile(o.profile.name||"復元利用者",o.profile.data);ROOT.profiles.push(p);persistRoot();switchProfile(p.id);alert("利用者として復元しました")}else throw Error("対応していないバックアップです")}catch(err){alert("復元できません："+err.message)}e.target.value=""});
++$("#importFile").addEventListener("change",async e=>{let f=e.target.files?.[0];if(!f)return;try{let o=JSON.parse(await f.text());checkpoint("バックアップ復元前");if(o?.type==="infomartOrderNav.multiuser"&&o.root?.profiles?.length){if(!confirm("全利用者バックアップで現在データを置き換えますか？"))return;ROOT=o.root;if(ROOT.schemaVersion!==SCHEMA_VERSION)ROOT=migrateImportedRoot(ROOT);ROOT.cloud=normalizeCloud(ROOT.cloud);ACTIVE_ID=ROOT.activeProfileId||ROOT.profiles[0].id;S=activeProfile().data;persistRoot();view="home";render();alert("復元しました")}else if(o?.type==="infomartOrderNav.profile"&&o.profile?.data){let p=newProfile(o.profile.name||"復元利用者",o.profile.data);ROOT.profiles.push(p);persistRoot();switchProfile(p.id);alert("利用者として復元しました")}else throw Error("対応していないバックアップです")}catch(err){alert("復元できません："+err.message)}e.target.value=""});
+ $("#masterImportFile").addEventListener("change",async e=>{let f=e.target.files?.[0];if(!f)return;try{let o=JSON.parse(await f.text());if(!(await requireAdmin("共通マスターを更新")))return;if(!confirm("個人プリセット・数量・発注間隔・履歴を残したまま、共通マスターだけ更新しますか？"))return;applyMasterPackage(o,{reason:"共通マスター更新"});alert("共通マスターを更新しました")}catch(err){alert("マスター更新に失敗："+err.message)}e.target.value=""});
+ function migrateImportedRoot(r){return r} // v1.3同形式以外は配布版の旧移行処理を利用
+ 
+@@ -2382,6 +2850,91 @@
+   const before=clone(ROOT),stored=localStorage.getItem(ROOT_KEY);
+   try{action()}catch(err){ROOT=before;S=activeProfile().data;try{if(stored!==null)localStorage.setItem(ROOT_KEY,stored)}catch(_){}render();throw Error('保存できませんでした。追加を取り消しました。バックアップ後に空き容量を確認してください。 '+err.message)}
+ }
++
++function catalogNorm(v){return String(v??"").replace(/\s+/g," ").trim()}
++function catalogComparableRow(r){return {name:catalogNorm(r?.name),specification:catalogNorm(r?.specification),vendorDisplay:catalogNorm(r?.vendorDisplay)}}
++function catalogRowChanged(p,row){
++  const a=catalogComparableRow(p.domSource||p),b=catalogComparableRow(row);
++  return ["name","specification","vendorDisplay"].some(k=>a[k]!==b[k]);
++}
++function catalogDiffBuild(entries,{fullScan=false}={}){
++  const byCode=new Map(),conflicts=[];
++  for(const e of entries){
++    if(e.error){conflicts.push({code:e.row?.code||"",reason:e.error,row:e.row});continue}
++    const r=e.row;try{validateDomRow(r)}catch(err){conflicts.push({code:r?.code||"",reason:err.message,row:r});continue}
++    const prev=byCode.get(r.code);
++    if(!prev){byCode.set(r.code,r);continue}
++    const keys=["name","specification","priceDisplay","unitDisplay","vendorDisplay"];
++    if(keys.some(k=>catalogNorm(prev[k])!==catalogNorm(r[k]))){conflicts.push({code:r.code,reason:"複数JSONで同じ商品コードの表示内容が一致しません",row:r});byCode.delete(r.code)}
++  }
++  const fresh=[...byCode.values()],masterByCode=new Map((ROOT.commonMaster.products||[]).map(p=>[String(p.code),p]));
++  const added=[],changed=[],unchanged=[];
++  for(const row of fresh){const p=masterByCode.get(row.code);if(!p)added.push({row});else if(catalogRowChanged(p,row))changed.push({p,row});else unchanged.push({p,row})}
++  const missing=fullScan?(ROOT.commonMaster.products||[]).filter(p=>!byCode.has(String(p.code))):[];
++  return {added,changed,unchanged,missing,conflicts,seenCodes:new Set(fresh.map(r=>r.code))};
++}
++function catalogChangeFields(p,row){
++  const cur=catalogComparableRow(p.domSource||p),next=catalogComparableRow(row),out=[];
++  if(cur.name!==next.name)out.push(["商品名",cur.name,next.name]);
++  if(cur.specification!==next.specification)out.push(["規格",cur.specification,next.specification]);
++  if(cur.vendorDisplay!==next.vendorDisplay)out.push(["Infomart発注先表示",cur.vendorDisplay,next.vendorDisplay]);
++  return out;
++}
++async function catalogDiffFilesSelected(fileList){
++  const files=[...(fileList||[])];const input=$("#catalogDiffFiles");if(input)input.value="";if(!files.length)return;
++  try{
++    const entries=[],reports=[];
++    for(const f of files){
++      if(f.size>15*1024*1024)throw Error(`${f.name}：ファイルが大きすぎます`);
++      const pkg=JSON.parse(await f.text()),rows=readDomPackage(pkg);entries.push(...rows);reports.push(`${f.name}：${rows.filter(x=>!x.error).length}行 / 除外 ${rows.filter(x=>x.error).length+(pkg.failures||[]).length}行`)
++    }
++    catalogDiffDialog(entries,reports);
++  }catch(err){alert("差分チェックできません："+err.message)}
++}
++function catalogDiffDialog(entries,reports){
++  const profileId=ACTIVE_ID;
++  modal(`<h2>Infomart商品一覧との差分チェック</h2><p>${esc(reports.join(" ／ "))}</p><div class="notice"><strong>安全ルール：</strong>商品は自動追加・自動更新・自動削除しません。新商品と内容変更は、チェックした行だけ反映します。</div><label class="catalog-fullscan-check"><input id="catalogFullScan" type="checkbox"> <strong>今回選んだJSONは、Infomart商品一覧の全ページ分です</strong><span>これをONにした場合だけ「掲載なし候補」を判定します。1ページでも抜けている場合はONにしないでください。</span></label><div id="catalogDiffBody"></div><div class="catalog-diff-sticky"><strong id="catalogDiffSelected">反映選択 0件</strong><button class="btn" id="catalogDiffApply">選択した新規・変更を反映し、確認結果を保存</button></div>`);
++  $("#modal").classList.add("ifm-wide");$("#modal").addEventListener("close",()=>$("#modal").classList.remove("ifm-wide"),{once:true});
++  let diff;
++  function renderDiff(){
++    diff=catalogDiffBuild(entries,{fullScan:$("#catalogFullScan").checked});
++    const body=$("#catalogDiffBody");
++    body.innerHTML=`<div class="catalog-diff-summary"><div class="new"><strong>${diff.added.length}</strong><span>新商品</span></div><div class="change"><strong>${diff.changed.length}</strong><span>内容変更</span></div><div class="same"><strong>${diff.unchanged.length}</strong><span>登録済み</span></div><div class="missing"><strong>${diff.missing.length}</strong><span>掲載なし候補</span></div><div class="conflict"><strong>${diff.conflicts.length}</strong><span>要確認</span></div></div>`;
++    if(diff.conflicts.length)body.insertAdjacentHTML("beforeend",`<section class="card catalog-conflict"><h3>要確認（自動反映しません）</h3>${diff.conflicts.map(x=>`<p><strong>${esc(x.code||"コード不明")}</strong>：${esc(x.reason)}</p>`).join("")}</section>`);
++    if(diff.added.length)body.insertAdjacentHTML("beforeend",`<div class="section">新商品</div>${diff.added.map((x,i)=>`<section class="card catalog-diff-card"><label class="check"><input type="checkbox" data-cdiff-new="${i}"> <strong>${esc(x.row.name)}</strong> <span class="catalog-status ok">新規</span></label><div class="muted">${esc(x.row.code)}</div><p><strong>規格：</strong>${esc(x.row.specification||"未取得")}</p><p><strong>Infomart表示：</strong>${esc(x.row.vendorDisplay)}</p><label class="field">発注先マスター<select data-cdiff-vendor="new-${i}">${vendorOptions()}</select></label></section>`).join("")}`);
++    if(diff.changed.length)body.insertAdjacentHTML("beforeend",`<div class="section">内容変更あり</div>${diff.changed.map((x,i)=>`<section class="card catalog-diff-card"><label class="check"><input type="checkbox" data-cdiff-change="${i}"> <strong>${esc(x.p.name||x.p.code)}</strong> <span class="catalog-status warn">変更あり</span></label><div class="muted">${esc(x.p.code)}</div>${catalogChangeFields(x.p,x.row).map(f=>`<div class="catalog-change-row"><b>${esc(f[0])}</b><span class="before">現在：${esc(f[1]||"（空）")}</span><span class="after">Infomart：${esc(f[2]||"（空）")}</span></div>`).join("")}<label class="field">発注先マスター<select data-cdiff-vendor="change-${i}">${ROOT.commonMaster.vendors.map(v=>`<option value="${esc(v.id)}" ${v.id===x.p.vendorId?"selected":""}>${esc(v.name)}</option>`).join("")}</select></label><p class="muted">数量・発注間隔・プリセットは変更しません。</p></section>`).join("")}`);
++    if(diff.unchanged.length)body.insertAdjacentHTML("beforeend",`<details class="card catalog-same"><summary>登録済み・変更なし ${diff.unchanged.length}件</summary><div class="catalog-code-list">${diff.unchanged.map(x=>`<span>${esc(x.row.code)} ${esc(x.row.name)}</span>`).join("")}</div></details>`);
++    if(diff.missing.length)body.insertAdjacentHTML("beforeend",`<section class="card catalog-missing"><h3>掲載なし候補 ${diff.missing.length}件</h3><div class="error"><strong>削除しません。</strong> 全ページ分として確認したJSONに商品コードが無かったものだけ候補表示します。</div>${diff.missing.map(p=>`<p><strong>${esc(p.code)}</strong> ${esc(p.name||"")} / ${esc(V(p.vendorId)?.name||"発注先未設定")}</p>`).join("")}</section>`);
++    bindDiffChecks();
++  }
++  function bindDiffChecks(){
++    const all=()=>$$('[data-cdiff-new]:checked').length+$$('[data-cdiff-change]:checked').length;const refresh=()=>{const el=$("#catalogDiffSelected");if(el)el.textContent=`反映選択 ${all()}件`};$$('[data-cdiff-new],[data-cdiff-change]').forEach(c=>c.onchange=refresh);refresh();
++  }
++  $("#catalogFullScan").onchange=renderDiff;renderDiff();
++  $("#catalogDiffApply").onclick=async()=>{
++    if(ACTIVE_ID!==profileId){alert("利用者が変わりました。差分チェックを開き直してください。");return}
++    const newIdx=$$('[data-cdiff-new]:checked').map(x=>+x.dataset.cdiffNew),changeIdx=$$('[data-cdiff-change]:checked').map(x=>+x.dataset.cdiffChange),fullScan=$("#catalogFullScan").checked,now=new Date().toISOString();
++    for(const i of newIdx){const vid=$(`[data-cdiff-vendor="new-${i}"]`)?.value;if(!ROOT.commonMaster.vendors.some(v=>v.id===vid)){alert(`${diff.added[i].row.code} の発注先マスターを選んでください`);return}}
++    for(const i of changeIdx){const vid=$(`[data-cdiff-vendor="change-${i}"]`)?.value;if(!ROOT.commonMaster.vendors.some(v=>v.id===vid)){alert(`${diff.changed[i].p.code} の発注先マスターを選んでください`);return}}
++    if(diff.conflicts.length&&!confirm(`要確認 ${diff.conflicts.length}件は反映せずに残ります。その他の確認結果だけ保存しますか？`))return;
++    if(!(await requireAdmin("商品差分チェック結果を共通マスターへ反映")))return;
++    checkpoint("商品差分チェック反映前");let added=0,updated=0;
++    try{
++      importTransaction(()=>{
++        const selectedNew=new Set(newIdx),selectedChanged=new Set(changeIdx);
++        // Existing rows seen in this scan are safe to mark as listed. Refresh domSource even when identity fields are unchanged.
++        for(const x of diff.unchanged){const p=ROOT.commonMaster.products.find(p=>p.id===x.p.id);if(!p)continue;p.domSource=clone(x.row);p.name=x.row.name;p.specification=x.row.specification;p.vendorDisplay=x.row.vendorDisplay;p.catalogStatus="listed";p.catalogLastSeenAt=now;p.catalogLastCheckAt=now;p.catalogSource="Infomart DOM"}
