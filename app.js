@@ -2,7 +2,7 @@
 "use strict";
 
 const SCHEMA_VERSION=3;
-const APP_VERSION="1.8.0";
+const APP_VERSION="1.8.1";
 const ROOT_KEY="infomartOrderNav.root.v3";
 const OLD_ROOT_KEY="infomartOrderNav.multiuser.v2";
 const LEGACY_KEY="infomartOrderNav.web.v1";
@@ -1994,6 +1994,10 @@ async function cloudCheckLatest(){
 let PERSONAL_BUSY=false;
 let PERSONAL_NOTICE_ID='';
 let PERSONAL_NOTICE='未同期：初回アップロード、またはクラウドから取得してください。';
+function personalSetNotice(identity,message){
+  PERSONAL_NOTICE_ID=identity;
+  PERSONAL_NOTICE=message;
+}
 function personalIdentity(){
   const c=ROOT.cloud;
   if(!cloudLoggedIn()||!c.orgId||!c.session?.user?.id)throw Error('会社登録済みのクラウドアカウントでログインしてください。');
@@ -2037,11 +2041,13 @@ function personalCheckpoint(reason){
 async function personalSync(action){
   if(PERSONAL_BUSY)return;
   PERSONAL_BUSY=true;
+  let noticeIdentity='';
   try{
     await cloudEnsureFreshSession();
-    const c=personalCapture(),master=await personalMaster(c),remote=await personalRemote(c),binding=personalBinding();
+    const c=personalCapture();noticeIdentity=c.identity+c.profileId;
+    const master=await personalMaster(c),remote=await personalRemote(c),binding=personalBinding();
     if(action==='check'){
-      PERSONAL_NOTICE=remote?`クラウド v${remote.version} / この端末 v${binding?.version||0}${remote.version!==(binding?.version||0)?'：差分があります。取得前に端末バックアップを保存してください。':''}`:'クラウド未登録：初回アップロードできます。';
+      personalSetNotice(noticeIdentity,remote?`クラウド v${remote.version} / この端末 v${binding?.version||0}${remote.version!==(binding?.version||0)?'：差分があります。取得前に端末バックアップを保存してください。':''}`:'クラウド未登録：初回アップロードできます。');
       return;
     }
     if(action==='upload'){
@@ -2056,7 +2062,7 @@ async function personalSync(action){
       const row=Array.isArray(result)?result[0]:result;
       if(!row||row.user_id!==ROOT.cloud.session.user.id||row.org_id!==c.orgId||row.version!==expected+1)throw Error('保存応答が不明です。クラウドから確認・取得してください。');
       activeProfile().personalCloud={identity:c.identity,version:row.version,syncedAt:row.updated_at};persistRoot();
-      PERSONAL_NOTICE=`保存済み v${row.version}。端末で変更したら再度クラウドへ保存してください。`;
+      personalSetNotice(noticeIdentity,`保存済み v${row.version}。端末で変更したら再度クラウドへ保存してください。`);
     }else if(action==='download'){
       if(!remote)throw Error('クラウドに個人設定はありません。初回アップロードを実行してください。');
       const next=PersonalCloud.apply(S,remote.payload,ROOT.commonMaster);
@@ -2065,9 +2071,9 @@ async function personalSync(action){
       const profile=activeProfile(),previous=S,oldBinding=profile.personalCloud;
       S=next;profile.data=S;profile.personalCloud={identity:c.identity,version:remote.version,syncedAt:remote.updated_at};
       try{persistRoot()}catch(e){S=previous;profile.data=previous;profile.personalCloud=oldBinding;throw e}
-      PERSONAL_NOTICE=`取得済み v${remote.version}。端末で変更したらクラウドへ保存してください。`;
+      personalSetNotice(noticeIdentity,`取得済み v${remote.version}。端末で変更したらクラウドへ保存してください。`);
     }
-  }catch(e){PERSONAL_NOTICE=String(e.message||e);alert(PERSONAL_NOTICE)}
+  }catch(e){personalSetNotice(noticeIdentity,String(e.message||e));alert(PERSONAL_NOTICE)}
   finally{PERSONAL_BUSY=false;render()}
 }
 function personalCloudCard(){
