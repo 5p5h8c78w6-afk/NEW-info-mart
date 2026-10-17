@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src https://wgsoxtphhclgdqcomnpd.supabase.co; base-uri 'none'; form-action 'none'">
+<title>発注ナビ パスワード再設定</title>
+<style>body{font:17px/1.7 system-ui,sans-serif;background:#f3f6fb;color:#18243b;margin:0}main{max-width:560px;margin:24px auto;padding:20px;background:white;border-radius:18px}h1{font-size:25px}label{display:block;margin:18px 0}input,textarea,button{font:inherit;box-sizing:border-box;width:100%;padding:12px;border:1px solid #b6c2d5;border-radius:9px}button{background:#1564d8;color:white;margin:10px 0;min-height:48px}button:disabled{background:#697589}p{overflow-wrap:anywhere}#status{padding:12px;background:#edf3ff;white-space:pre-wrap}small{color:#516078}a{color:#1559b3}@media(max-width:600px){main{margin:0;border-radius:0}}</style></head>
+<body><main><h1>発注ナビ パスワード再設定</h1>
+<p>既存アカウント専用です。商品・会社・プリセットは変更しません。</p>
+<p>Supabaseの利用者詳細から再設定メールを送信した後、メール内のリンクを<strong>開かずにコピー</strong>して、下へ貼り付けてください。リンクは一度だけ使えます。</p>
+<small>リンク・パスワードをチャットへ送らないでください。このページはメールを送信しません。</small>
+<section id="verifySection"><label>既存プロジェクトのPublishable key（旧anon keyも可）<input id="key" type="password" autocomplete="off" spellcheck="false"></label>
+<label>メール内の再設定リンク<textarea id="link" rows="4" autocomplete="off" spellcheck="false" autocapitalize="off"></textarea></label>
+<button id="verify" type="button">リンクで本人確認</button></section>
+<section id="passwordSection" hidden><p id="identity"></p>
+<label>新しいパスワード（12文字以上）<input id="password" type="password" autocomplete="new-password" minlength="12"></label>
+<label>もう一度入力<input id="repeat" type="password" autocomplete="new-password" minlength="12"></label>
+<button id="save" type="button">このアカウントのパスワードを変更</button></section>
+<p id="status" role="status" aria-live="polite">本人確認はまだ実行していません。</p>
+<p><a href="./">発注ナビへ戻る</a></p>
+<script src="recover.js"></script></main></body></html>
