@@ -1,0 +1,43 @@
+const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs');
+const {PGlite}=require('@electric-sql/pglite');
+const A='00000000-0000-0000-0000-000000000001',B='00000000-0000-0000-0000-000000000002',O='00000000-0000-0000-0000-000000000010';
+const product={id:'p1',code:'00123456789',allowDecimalQty:false};
+const payload={schema:1,products:[{productId:'p1',code:product.code,defaultQty:2,intervalMode:'n',intervalDays:7,firstOrderDate:'2026-10-03'}],presets:[{id:'r1',name:'週次',items:[{productId:'p1',code:product.code,qty:4}]}]};
+test('actual upgrade: additive, repeatable, self-only RLS, RPC identity, CAS, master and scope guards',async()=>{
+ const db=new PGlite();
+ try{
+ await db.exec(`create role anon; create role authenticated; create schema auth; create table auth.users(id uuid primary key); create function auth.uid() returns uuid language sql stable as $$select nullif(current_setting('request.jwt.claim.sub',true),'')::uuid$$; grant usage on schema auth to authenticated; grant execute on function auth.uid() to authenticated;`);
+ const source=fs.readFileSync(require.resolve('../app.js'),'utf8');
+ const setup=JSON.parse(source.match(/const CLOUD_SETUP_SQL=("(?:[^"\\]|\\.)*");/)[1]).replace('create extension if not exists pgcrypto;','');
+ await db.exec(setup);
+ await db.query(`insert into auth.users values($1),($2)`,[A,B]);
+ await db.query(`insert into public.organizations(id,name,created_by) values($1,'Org',$2)`,[O,A]);
+ await db.query(`insert into public.org_members(org_id,user_id,role,display_name) values($1,$2,'owner','A'),($1,$3,'orderer','B')`,[O,A,B]);
+ await db.query(`insert into public.shared_master(org_id,master_version,payload,updated_by) values($1,1,$2,$3)`,[O,JSON.stringify({products:[product]}),A]);
+ const before=await db.query('select * from public.shared_master');
+ const sql=fs.readFileSync(require.resolve('../sql/upgrade-v1.8.0-personal.sql'),'utf8');await db.exec(sql);await db.exec(sql);
+ assert.deepEqual((await db.query('select * from public.shared_master')).rows,before.rows);
+ const login=async id=>{await db.exec('reset role');await db.query("select set_config('request.jwt.claim.sub',$1,false)",[id]);await db.exec('set role authenticated')};
+ const save=(version=0,p=payload,master=1,org=O)=>db.query('select * from public.save_personal_settings($1,$2,$3,$4)',[org,version,master,JSON.stringify(p)]);
+ await login(A);assert.equal((await save()).rows[0].version,1);
+ await assert.rejects(save(),/personal_version_conflict/);assert.equal((await save(1)).rows[0].version,2);
+ await login(B);
+ assert.equal((await db.query('select * from public.shared_master')).rows.length,1);
+ assert.equal((await db.query('update public.shared_master set master_version=99 returning *')).rows.length,0);
+ assert.equal((await db.query('select master_version from public.shared_master')).rows[0].master_version,1);
+ assert.equal((await db.query('select * from public.personal_settings')).rows.length,0);
+ await assert.rejects(db.query('update public.personal_settings set version=99 where user_id=$1',[A]),/permission denied/);
+ await assert.rejects(db.query('insert into public.personal_settings(user_id,org_id,version,master_version,payload) values($1,$2,1,1,$3)',[A,O,JSON.stringify(payload)]),/permission denied/);
+ assert.equal((await save()).rows[0].user_id,B);
+ await assert.rejects(save(1,payload,99),/personal_master_conflict/);
+ await assert.rejects(save(1,{...payload,history:[]}),/personal_invalid/);
+ await assert.rejects(save(1,{...payload,products:[{...payload.products[0],code:'wrong'}]}),/personal_unknown_product/);
+ for(const patch of [{defaultQty:-1},{defaultQty:1.5},{intervalDays:0},{firstOrderDate:'2026-02-30'},{intervalMode:'other'}])await assert.rejects(save(1,{...payload,products:[{...payload.products[0],...patch}]}));
+ await assert.rejects(save(1,{...payload,presets:[{...payload.presets[0],items:[{...payload.presets[0].items[0],productId:'missing'}]}]}),/personal_unknown_product/);
+ await assert.rejects(save(1,payload,1,'00000000-0000-0000-0000-000000000099'),/personal_not_authorized/);
+ await db.exec('reset role');await db.exec('set role anon');await assert.rejects(db.query('select * from public.personal_settings'),/permission denied/);await assert.rejects(save(),/permission denied/);
+ await login('');await assert.rejects(save(),/personal_not_authorized/);assert.equal((await db.query('select * from public.personal_settings')).rows.length,0);
+ await login(A);assert.equal((await db.query('select * from public.personal_settings')).rows.length,1);
+ await db.exec('reset role');await db.query('update public.shared_master set payload=$1,master_version=2 where org_id=$2',[JSON.stringify({products:[]}),O]);await login(A);await assert.rejects(save(2,payload,2),/personal_unknown_product/);
+ }finally{await db.close()}
+});

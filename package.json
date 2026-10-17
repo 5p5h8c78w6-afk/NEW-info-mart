@@ -1,0 +1,1 @@
+{"name":"infomart-order-nav","private":true,"version":"1.8.0","scripts":{"test":"node --test tests/*.test.cjs","check":"node tools/check-syntax.cjs"},"devDependencies":{"@electric-sql/pglite":"0.3.14"}}

@@ -1,0 +1,3 @@
+const fs=require('node:fs'),path=require('node:path'),{spawnSync}=require('node:child_process');
+function walk(dir){return fs.readdirSync(dir,{withFileTypes:true}).flatMap(e=>['node_modules','.git'].includes(e.name)?[]:e.isDirectory()?walk(path.join(dir,e.name)):/\.(js|cjs)$/.test(e.name)?[path.join(dir,e.name)]:[])}
+const files=walk(path.resolve(__dirname,'..'));for(const file of files){const result=spawnSync(process.execPath,['--check',file],{encoding:'utf8'});if(result.status!==0){process.stderr.write(result.stderr);process.exit(1)}}console.log(`${files.length} JavaScript files: syntax PASS`);
