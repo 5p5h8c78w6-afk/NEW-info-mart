@@ -25,3 +25,33 @@ test('cross-tab storage update blocks reflection',async()=>{let h;h=harness({rem
 test('backup failure and persistence failure preserve local data; no upload when backup fails',async()=>{for(const action of ['upload','download']){const h=harness({remote:action==='download'?remote:null,failBackup:true});await h.run(action);assert.deepEqual(h.context.S,data);assert.equal(h.effects.requests.filter(x=>x.opts).length,0);assert.match(h.effects.alerts[0],/quota/)}const h=harness({remote,failPersist:true});await h.run('download');assert.deepEqual(h.context.S,data);assert.equal(h.root.profiles[0].personalCloud,undefined)});
 test('deleted remote product cannot resurrect master or replace local data',async()=>{const h=harness({remote:{...remote,payload:{...remote.payload,products:[{...remote.payload.products[0],productId:'deleted'}]}}});await h.run('download');assert.deepEqual(h.context.S,data);assert.deepEqual(h.root.commonMaster,master);assert.ok(h.effects.alerts.length)});
 test('server conflict after preflight preserves local binding and edits',async()=>{const h=harness({onRequest:(c,path)=>{if(path.includes('/rpc/'))throw Error('personal_version_conflict')}});await h.run('upload');assert.equal(h.root.profiles[0].personalCloud,undefined);assert.deepEqual(h.context.S,data)});
+test('latest check renders the unregistered result without writing or changing local data',async()=>{
+ const h=harness(),before=copy(h.root);await h.run('check');
+ assert.match(h.context.personalCloudCard(),/クラウド未登録：初回アップロードできます。/);
+ assert.equal(h.effects.alerts.length,0);assert.equal(h.effects.requests.filter(x=>x.opts).length,0);
+ assert.equal(h.effects.renders,1);assert.deepEqual(h.root,before);
+});
+test('latest check renders matching and conflicting cloud versions',async()=>{
+ for(const version of [1,2]){const h=harness({remote:{...remote,version},binding:true});await h.run('check');const html=h.context.personalCloudCard();assert.ok(html.includes(`クラウド v${version} / この端末 v1`));assert.equal(html.includes('：差分があります。'),version===2);assert.equal(h.effects.requests.filter(x=>x.opts).length,0)}
+});
+test('latest check failure appears in the same users card without a write',async()=>{
+ const h=harness({onRequest:()=>{throw Error('network_read_failed')}});await h.run('check');
+ assert.match(h.context.personalCloudCard(),/network_read_failed/);assert.equal(h.effects.alerts[0],'network_read_failed');assert.deepEqual(h.context.S,data);assert.equal(h.effects.requests.filter(x=>x.opts).length,0);
+});
+test('upload and download results appear in their users card',async()=>{
+ const upload=harness();await upload.run('upload');assert.match(upload.context.personalCloudCard(),/保存済み v1/);
+ const download=harness({remote});await download.run('download');assert.match(download.context.personalCloudCard(),/取得済み v1/);
+});
+test('completed result is hidden after switching account, organization or local profile',async()=>{
+ for(const change of [h=>{h.root.cloud.session.user.id='u2'},h=>{h.root.cloud.orgId='other-org'},h=>{h.root.profiles.unshift({id:'other-profile',name:'別利用者',data:copy(data)})}]){
+  const h=harness();await h.run('check');change(h);const html=h.context.personalCloudCard();assert.doesNotMatch(html,/クラウド未登録：初回アップロードできます。/);assert.match(html,/未同期：初回アップロード、またはクラウドから取得してください。/);
+ }
+});
+test('account switch during a read does not bind the old request error to the new account',async()=>{
+ const h=harness({onRequest:c=>{c.ROOT.cloud.session.user.id='u2'}});await h.run('check');
+ assert.match(h.effects.alerts[0],/処理中/);assert.doesNotMatch(h.context.personalCloudCard(),/反映を停止しました/);assert.deepEqual(h.context.S,data);
+});
+test('cancelling a different account upload does not relabel the prior accounts result',async()=>{
+ const h=harness();await h.run('check');h.root.cloud.session.user.id='u2';h.context.confirm=()=>false;await h.run('upload');
+ assert.doesNotMatch(h.context.personalCloudCard(),/クラウド未登録：初回アップロードできます。/);assert.equal(h.effects.requests.filter(x=>x.opts).length,0);assert.deepEqual(h.context.S,data);
+});
