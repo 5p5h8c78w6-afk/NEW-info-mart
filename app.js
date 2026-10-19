@@ -2,7 +2,7 @@
 "use strict";
 
 const SCHEMA_VERSION=3;
-const APP_VERSION="1.8.1";
+const APP_VERSION="1.8.2";
 const ROOT_KEY="infomartOrderNav.root.v3";
 const OLD_ROOT_KEY="infomartOrderNav.multiuser.v2";
 const LEGACY_KEY="infomartOrderNav.web.v1";
@@ -675,7 +675,7 @@ function home(){
   return `<section class="friendly-hero"><div class="friendly-hero-copy"><span class="friendly-hello">こんにちは！</span><h2>発注業務をかんたんに、<br>スムーズに進めましょう。</h2><p>${esc(name)}さんの必要な作業を分かりやすくまとめています。</p></div><div class="friendly-hero-mark"><span>✓</span><small>今日も<br>よろしく<br>お願いします！</small></div></section>
     ${cd?`<div class="countdown ${cd.cls}"><div><strong>今日の締切</strong><br><span class="muted">最も近い締切</span></div><div class="time">${esc(cd.label)}</div></div>`:""}
     ${homeMenu()}${nextAction(c)}${pendingRunCard()}
-    ${section("要対応",c.attention,"orange")}${section("発注漏れ注意",c.overdue,"red")}${section("今日の発注",c.due,"green")}
+    ${attentionBulkPanel(c)}${section("要対応",c.attention,"orange")}${section("発注漏れ注意",c.overdue,"red")}${section("今日の発注",c.due,"green")}
     ${c.upcoming.length?`<div class="section">これからの発注</div><section class="card">${c.upcoming.slice(0,5).map(row).join("")}</section>`:""}`;
 }
 
@@ -843,6 +843,54 @@ function oneTimeQtyDialog(key){
   $("#clearOneTimeQty")?.addEventListener("click",()=>{checkpoint("今回だけ数量修正解除前");clearQuantityOverride(key);save("今回だけ数量修正解除");$("#modal").close()});
 }
 
+function pastAttentionEntries(c=classify()){
+  const t=today(),pending=new Set(S.pendingRun?.entryKeys||[]);
+  return [...new Map(c.attention.filter(e=>e.scheduled instanceof Date&&e.scheduled<t&&e.due instanceof Date&&e.due<t&&!pending.has(e.key)).map(e=>[e.key,e])).values()];
+}
+function attentionBulkPanel(c){
+  const count=pastAttentionEntries(c).length;
+  const undo=(S.attentionSkipUndo?.keys||[]).filter(key=>(S.canceled||[]).includes(key));
+  if(!count&&!undo.length)return "";
+  return `<section class="card attention-bulk"><h3>過去の要対応をまとめて整理</h3><p class="muted">過去の日付の要対応だけをスキップします。今日・未来・入力確認中の予定、履歴、商品設定は残します。この端末の現在の利用者だけが対象です。</p><div class="row wrap">${count?`<button class="btn secondary" id="skipPastAttention">過去の要対応を一括スキップ（${count}件）</button>`:""}${undo.length?`<button class="btn secondary" id="undoPastAttention">直前の一括スキップを取り消す（${undo.length}件）</button>`:""}</div></section>`;
+}
+function attentionBulkCheckpoint(reason){
+  const snapshot={id:uid(),time:Date.now(),at:new Date().toISOString(),reason,data:JSON.stringify(ROOT)};
+  const text=JSON.stringify([snapshot,...getSnapshots()].slice(0,12));
+  localStorage.setItem(SNAP_KEY,text);
+  if(localStorage.getItem(SNAP_KEY)!==text)throw Error("復元ポイントを保存できません。一括操作を停止しました。");
+}
+function persistAttentionBulk(canceled,undo,reason){
+  const profile=activeProfile(),oldCanceled=S.canceled,oldUndo=S.attentionSkipUndo,oldUpdatedAt=profile.updatedAt;
+  try{
+    attentionBulkCheckpoint(reason+"前");
+    S.canceled=canceled;
+    if(undo)S.attentionSkipUndo=undo;else delete S.attentionSkipUndo;
+    profile.data=S;profile.updatedAt=new Date().toISOString();persistRoot();
+  }catch(e){
+    S.canceled=oldCanceled;
+    if(oldUndo===undefined)delete S.attentionSkipUndo;else S.attentionSkipUndo=oldUndo;
+    profile.updatedAt=oldUpdatedAt;
+    alert("一括操作を保存できませんでした。変更していません。\n"+String(e.message||e));return false;
+  }
+  render();return true;
+}
+function skipPastAttention(){
+  const targets=pastAttentionEntries();
+  if(!targets.length){alert("一括スキップできる過去の要対応はありません。");return}
+  const dates=targets.map(e=>iso(e.scheduled)).sort();
+  if(!confirm(`「${activeProfile()?.name||"現在の利用者"}」の過去の要対応 ${targets.length}件\n対象日：${dates[0]} ～ ${dates.at(-1)}\n\n対象を今回だけスキップします。発注済みにはしません。\n今日・未来・入力確認中の予定、履歴、商品設定、次回の周期は変更しません。\n\n実行前に復元ポイントを保存します。\n「直前の一括スキップを取り消す」で元に戻せます。\n\nよろしいですか？`))return;
+  const keys=targets.map(e=>e.key);
+  persistAttentionBulk([...new Set([...(S.canceled||[]),...keys])],{keys,at:new Date().toISOString()},"過去の要対応一括スキップ");
+}
+function undoPastAttention(){
+  const pending=new Set(S.pendingRun?.entryKeys||[]);
+  const keys=(S.attentionSkipUndo?.keys||[]).filter(key=>(S.canceled||[]).includes(key));
+  if(!keys.length){alert("取り消せる一括スキップはありません。");return}
+  if(keys.some(key=>pending.has(key))){alert("入力確認中の予定が含まれるため、取り消しを停止しました。");return}
+  if(!confirm(`直前にまとめてスキップした ${keys.length}件を発注予定へ戻しますか？\n個別にスキップした予定や履歴は変更しません。`))return;
+  const restore=new Set(keys);
+  persistAttentionBulk((S.canceled||[]).filter(key=>!restore.has(key)),null,"過去の要対応一括スキップ取消");
+}
 function skipOnce(key){
   const e=entries().find(x=>x.key===key);
   if(!e){alert("この発注予定が見つかりません。画面を更新してもう一度確認してください。");return}
@@ -935,6 +983,7 @@ function todayView(){
       </div>
       <div class="history-quick row wrap"><button class="btn secondary small" id="openHistory">発注履歴を見る</button><button class="btn secondary small" id="openPrevYearMonth">前年同月を表示</button></div>
     </section>
+    ${attentionBulkPanel(c)}
     <section class="card order-list-card">
       <div class="order-list-summary"><strong>${rows.length}件表示</strong><span class="muted">Infomartでの納品日選択・最終確定は手動です。</span></div>
       ${rows.length?`<div class="order-table-wrap"><table class="order-table"><thead><tr><th>状態</th><th>発注日・締切</th><th>発注先</th><th>納品日</th><th>商品</th><th>数量</th><th>操作</th></tr></thead><tbody>${rows.map(todayTableRow).join("")}</tbody></table></div><div class="order-mobile-list">${rows.map(todayMobileCard).join("")}</div>`:'<div class="empty-state">条件に合う発注予定はありません。</div>'}
@@ -2208,6 +2257,8 @@ function bind(){
   $$("[data-paper-open]").forEach(b=>b.onclick=()=>scheduleViewDialog(b.dataset.paperOpen));
   $$("[data-one]").forEach(b=>b.onclick=()=>startOne(b.dataset.one));
   $$("[data-skip]").forEach(b=>b.onclick=()=>skipOnce(b.dataset.skip));
+  $("#skipPastAttention")?.addEventListener("click",skipPastAttention);
+  $("#undoPastAttention")?.addEventListener("click",undoPastAttention);
   $$("[data-unskip]").forEach(b=>b.onclick=()=>unskipOnce(b.dataset.unskip));
   $$("[data-editqty]").forEach(b=>b.onclick=()=>oneTimeQtyDialog(b.dataset.editqty));
   $$("[data-clearqty]").forEach(b=>b.onclick=()=>{const key=b.dataset.clearqty;if(!confirm("今回だけの数量修正を解除して、通常数量へ戻しますか？"))return;checkpoint("今回だけ数量修正解除前");clearQuantityOverride(key);save("今回だけ数量修正解除")});
