@@ -57,5 +57,5 @@ test('invalid and duplicate product codes remain rejected after return',async()=
   const h=harness();h.context.productMasterDialog();await h.create();h.dialog.close();h.get('#mc').value='bad';h.get('#sm').onclick();assert.equal(h.root.commonMaster.products.length,0);h.root.commonMaster.products.push({id:'other',code:'00123456789'});h.get('#mc').value='00123456789';h.get('#sm').onclick();assert.equal(h.root.commonMaster.products.length,1);assert.equal(h.effects.alerts.length,2);
 });
 test('ordinary vendor management still closes on save and app/SW patch versions agree',()=>{
-  const h=harness();h.context.vendorDialog();h.get('#vn').value='通常';h.get('#sv').onclick();assert.equal(h.dialog.open,false);assert.match(source,/const APP_VERSION="1\.8\.2"/);assert.match(fs.readFileSync(require.resolve('../sw.js'),'utf8'),/infomart-order-nav-v1\.8\.2/);assert.equal(source.includes('1.7.0'),false);
+  const h=harness();h.context.vendorDialog();h.get('#vn').value='通常';h.get('#sv').onclick();assert.equal(h.dialog.open,false);assert.match(source,/const APP_VERSION="1\.8\.3"/);assert.match(fs.readFileSync(require.resolve('../sw.js'),'utf8'),/infomart-order-nav-v1\.8\.3/);assert.equal(source.includes('1.7.0'),false);
 });
