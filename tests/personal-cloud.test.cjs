@@ -55,3 +55,74 @@ test('cancelling a different account upload does not relabel the prior accounts 
  const h=harness();await h.run('check');h.root.cloud.session.user.id='u2';h.context.confirm=()=>false;await h.run('upload');
  assert.doesNotMatch(h.context.personalCloudCard(),/クラウド未登録：初回アップロードできます。/);assert.equal(h.effects.requests.filter(x=>x.opts).length,0);assert.deepEqual(h.context.S,data);
 });
+test('account, profile, edits and other-tab changes during final authentication stop the RPC before transport',async()=>{
+ for(const change of [h=>{h.root.cloud.session.user.id='u2'},h=>{h.root.profiles.unshift({id:'other',name:'別利用者',data:copy(data)});h.context.S=h.root.profiles[0].data},h=>{h.context.S.products[0].defaultQty=77},h=>h.changeStore()]){
+  const h=harness(),sent=[];let authCalls=0;
+  h.context.cloudConfigured=()=>true;
+  h.context.cloudEnsureFreshSession=async()=>{if(++authCalls===3)change(h)};
+  h.context.fetch=async(url,opts)=>{sent.push({url,opts});return {ok:true,text:async()=>JSON.stringify(opts.method==='POST'?{user_id:h.root.cloud.session.user.id,org_id:'org',version:1,updated_at:'now'}:[])}};
+  vm.runInContext(source.slice(source.indexOf('async function cloudRequest('),source.indexOf('async function cloudAudit(')),h.context);
+  await h.run('upload');
+  assert.equal(sent.filter(x=>x.opts.method==='POST').length,0,'changed context must not receive the previous users payload');
+  assert.equal(h.root.profiles.some(p=>p.personalCloud),false);
+  assert.match(h.effects.alerts[0],/処理中/);
+ }
+});
+test('late refresh success or failure cannot replace or clear a newly selected account',async()=>{
+ for(const success of [true,false]){
+  let finish,persists=0;
+  const oldSession={expires_at:0,refresh_token:'old-refresh',user:{id:'u1'}},nextSession={access_token:'new-access',user:{id:'u2'}};
+  const root={cloud:{session:oldSession,orgId:'org',role:'owner',members:['new-member'],stores:['new-store']}};
+  const context=vm.createContext({ROOT:root,Date,Error,cloudLoggedIn:()=>true,cloudAuthRaw:()=>new Promise((resolve,reject)=>{finish=()=>success?resolve({access_token:'old-access',user:{id:'u1'}}):reject(Error('refresh_failed'))}),persistRoot:()=>persists++});
+  vm.runInContext(source.slice(source.indexOf('function cloudStoreSession('),source.indexOf('async function cloudRequest(')),context);
+  const pending=context.cloudEnsureFreshSession();root.cloud.session=nextSession;
+  finish();await assert.rejects(pending);
+  assert.equal(root.cloud.session,nextSession);assert.equal(root.cloud.orgId,'org');assert.equal(root.cloud.role,'owner');assert.equal(persists,0);
+ }
+});
+test('upload persistence failure restores the previous binding and explains that the server may already be saved',async()=>{
+ for(const bound of [false,true]){
+  const h=harness({remote:bound?remote:null,binding:bound,failPersist:true}),before=copy(h.root.profiles[0].personalCloud??null);
+  await h.run('upload');
+  assert.deepEqual(h.root.profiles[0].personalCloud??null,before);
+  assert.deepEqual(h.context.S,data);assert.equal(h.row.version,bound?2:1);
+  assert.match(h.effects.alerts[0],/端末.*保存|同期情報/);assert.match(h.effects.alerts[0],/確認・取得/);
+  assert.doesNotMatch(h.context.personalCloudCard(),/保存済み v/);
+ }
+});
+test('ordinary refresh still succeeds and a failed refresh only clears its own session',async()=>{
+ for(const success of [true,false]){
+  let persists=0;
+  const root={cloud:{projectUrl:'https://example.supabase.co',publicKey:'public',session:{expires_at:0,refresh_token:'refresh',user:{id:'u1'}},orgId:'org',role:'owner',members:[],stores:[]}};
+  const context=vm.createContext({ROOT:root,Date,Error,cloudLoggedIn:()=>true,cloudAuthRaw:async()=>{if(!success)throw Error('refresh_failed');return {access_token:'new-access',refresh_token:'next-refresh',expires_in:3600,user:{id:'u1'}}},persistRoot:()=>persists++});
+  vm.runInContext(source.slice(source.indexOf('function cloudStoreSession('),source.indexOf('async function cloudRequest(')),context);
+  if(success){await context.cloudEnsureFreshSession();assert.equal(root.cloud.session.access_token,'new-access');assert.equal(root.cloud.orgId,'org')}
+  else {await assert.rejects(context.cloudEnsureFreshSession(),/refresh_failed/);assert.equal(root.cloud.session,null);assert.equal(root.cloud.orgId,'')}
+  assert.equal(persists,1);
+ }
+});
+test('real request transport saves normally and a lost acknowledgement is never automatically retried',async()=>{
+ for(const loseReply of [false,true]){
+  const h=harness();let row=null,writes=0;
+  h.context.cloudConfigured=()=>true;
+  h.context.fetch=async(url,opts)=>{
+   if(opts.method==='POST'){
+    const body=JSON.parse(opts.body);assert.equal(body.p_expected_version,0);writes++;
+    row={user_id:'u1',org_id:'org',version:1,updated_at:'now',payload:body.p_payload};
+    if(loseReply)throw Error('network_reply_lost');
+   }
+   return {ok:true,text:async()=>JSON.stringify(opts.method==='POST'?row:row?[row]:[])};
+  };
+  vm.runInContext(source.slice(source.indexOf('async function cloudRequest('),source.indexOf('async function cloudAudit(')),h.context);
+  await h.run('upload');assert.equal(writes,1);assert.deepEqual(h.context.S,data);
+  if(loseReply){assert.equal(h.root.profiles[0].personalCloud,undefined);await h.run('upload');assert.equal(writes,1);assert.match(h.effects.alerts.at(-1),/personal_version_conflict/);await h.run('download')}
+  assert.equal(h.root.profiles[0].personalCloud.version,1);assert.deepEqual(h.context.S,data);
+ }
+});
+test('duplicate clicks while a request is pending cannot dispatch a second save',async()=>{
+ let release,reads=0;
+ const gate=new Promise(resolve=>{release=resolve}),h=harness({onRequest:async()=>{reads++;await gate}});
+ const pending=h.run('upload');await Promise.resolve();await Promise.resolve();await h.run('upload');
+ release();await pending;
+ assert.equal(h.effects.requests.filter(x=>x.opts).length,1);assert.equal(h.row.version,1);assert.equal(reads,2);
+});

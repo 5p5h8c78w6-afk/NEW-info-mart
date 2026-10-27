@@ -2,7 +2,7 @@
 "use strict";
 
 const SCHEMA_VERSION=3;
-const APP_VERSION="1.8.2";
+const APP_VERSION="1.8.3";
 const ROOT_KEY="infomartOrderNav.root.v3";
 const OLD_ROOT_KEY="infomartOrderNav.multiuser.v2";
 const LEGACY_KEY="infomartOrderNav.web.v1";
@@ -1768,20 +1768,23 @@ function cloudStoreSession(data){
 }
 async function cloudEnsureFreshSession(){
   if(!cloudLoggedIn())throw new Error("クラウドへログインしてください。");
-  const s=ROOT.cloud.session,now=Math.floor(Date.now()/1000);
+  const c=ROOT.cloud,s=c.session,projectUrl=c.projectUrl,publicKey=c.publicKey,now=Math.floor(Date.now()/1000);
+  const sameSession=()=>ROOT.cloud===c&&c.session===s&&c.projectUrl===projectUrl&&c.publicKey===publicKey;
   if((+s.expires_at||0)>now+90)return s;
   if(!s.refresh_token){ROOT.cloud.session=null;persistRoot();throw new Error("セッションの期限が切れました。再ログインしてください。")}
   try{
     const data=await cloudAuthRaw("/auth/v1/token?grant_type=refresh_token",{refresh_token:s.refresh_token});
+    if(!sameSession())throw new Error("認証更新中にクラウドアカウントまたは接続先が変わりました。処理を停止しました。");
     cloudStoreSession(data);return ROOT.cloud.session;
   }catch(e){
-    ROOT.cloud.session=null;ROOT.cloud.role="";ROOT.cloud.orgId="";ROOT.cloud.members=[];ROOT.cloud.stores=[];persistRoot();
+    if(sameSession()){c.session=null;c.role="";c.orgId="";c.members=[];c.stores=[];persistRoot()}
     throw e;
   }
 }
-async function cloudRequest(path,{method="GET",body=null,auth=true,headers={}}={}){
+async function cloudRequest(path,{method="GET",body=null,auth=true,headers={},beforeRequest=null}={}){
   if(!cloudConfigured())throw new Error("Supabase設定が未完了です。");
   if(auth)await cloudEnsureFreshSession();
+  if(beforeRequest)beforeRequest();
   const c=ROOT.cloud,url=cloudSanitizeProjectUrl(c.projectUrl)+path;
   const h={"apikey":c.publicKey,"Content-Type":"application/json",...headers};
   if(auth&&c.session?.access_token)h.Authorization=`Bearer ${c.session.access_token}`;
@@ -2105,12 +2108,17 @@ async function personalSync(action){
       if((remote?.version||0)!==expected)throw Error('personal_version_conflict：クラウドが更新されています。端末は保持しています。バックアップ後「クラウドから取得」を明示選択してください。');
       if(!confirm(remote?'現在の個人設定・プリセットをクラウドへ保存しますか？':`「${activeProfile().name}」の個人設定・プリセットをこのクラウドアカウントへ初回移行しますか？\n端末データは削除しません。`))return;
       personalAssertCurrent(c);personalCheckpoint('個人クラウド保存前');
-      const result=await cloudRequest('/rest/v1/rpc/save_personal_settings',{method:'POST',body:{p_org:c.orgId,p_expected_version:expected,p_master_version:master.master_version,p_payload:c.payload}});
+      const result=await cloudRequest('/rest/v1/rpc/save_personal_settings',{method:'POST',body:{p_org:c.orgId,p_expected_version:expected,p_master_version:master.master_version,p_payload:c.payload},beforeRequest:()=>personalAssertCurrent(c)});
       // A response may arrive after profile/account switches: never attach its version then.
       personalAssertCurrent(c);
       const row=Array.isArray(result)?result[0]:result;
       if(!row||row.user_id!==ROOT.cloud.session.user.id||row.org_id!==c.orgId||row.version!==expected+1)throw Error('保存応答が不明です。クラウドから確認・取得してください。');
-      activeProfile().personalCloud={identity:c.identity,version:row.version,syncedAt:row.updated_at};persistRoot();
+      const profile=activeProfile(),oldBinding=profile.personalCloud;
+      profile.personalCloud={identity:c.identity,version:row.version,syncedAt:row.updated_at};
+      try{persistRoot()}catch(e){
+        if(oldBinding===undefined)delete profile.personalCloud;else profile.personalCloud=oldBinding;
+        throw Error('クラウド保存後、端末の同期情報を保存できませんでした。自動再送せず、クラウドから確認・取得してください。 '+String(e.message||e));
+      }
       personalSetNotice(noticeIdentity,`保存済み v${row.version}。端末で変更したら再度クラウドへ保存してください。`);
     }else if(action==='download'){
       if(!remote)throw Error('クラウドに個人設定はありません。初回アップロードを実行してください。');
